@@ -1,3 +1,4 @@
+use deltalake::DeltaTableError;
 use tonic::{Request, Response, Status};
 
 use crate::config::storage::load_storage_options;
@@ -72,8 +73,48 @@ impl DeltaTxnService for DeltaTxnGrpcServer {
 
     async fn get_table(
         &self,
-        _req: Request<GetTableRequest>,
+        req: Request<GetTableRequest>,
     ) -> Result<Response<GetTableResponse>, Status> {
-        Err(Status::unimplemented("GetTable not implemented yet"))
+        let r = req.into_inner();
+        let table_uri = r.table_uri;
+
+        let storage_opts = load_storage_options();
+        let table = open_table(&table_uri, storage_opts)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let snapshot = table.snapshot().map_err(|e| match e {
+            DeltaTableError::NotInitialized => {
+                Status::failed_precondition("table not initialized")
+            }
+            _ => Status::internal(e.to_string()),
+        })?;
+
+        let metadata = snapshot.metadata();
+        let protocol = snapshot.protocol();
+
+        let schema_string = metadata
+            .parse_schema()
+            .map_err(|e| Status::internal(e.to_string()))
+            .and_then(|schema| {
+                serde_json::to_string(&schema).map_err(|e| Status::internal(e.to_string()))
+            })?;
+
+        Ok(Response::new(GetTableResponse {
+            version: snapshot.version(),
+            metadata: Some(TableMetadata {
+                id: metadata.id().to_string(),
+                name: metadata.name().unwrap_or_default().to_string(),
+                description: metadata.description().unwrap_or_default().to_string(),
+                schema_string,
+                partition_columns: metadata.partition_columns().clone(),
+                configuration: metadata.configuration().clone(),
+                created_time: metadata.created_time().unwrap_or_default(),
+            }),
+            protocol: Some(Protocol {
+                min_reader_version: protocol.min_reader_version(),
+                min_writer_version: protocol.min_writer_version(),
+            }),
+        }))
     }
 }
