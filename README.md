@@ -131,8 +131,9 @@ cargo build --release
 
 ### Run
 ```bash
-./target/release/delta-txn-service
+DELTA_TXN_GRPC_ADDR=0.0.0.0:50051 ./target/release/delta-txn-service
 ```
+Set `DELTA_TXN_GRPC_ADDR` to change the gRPC bind address (default `0.0.0.0:50051`).
 
 ### Docker
 ```bash
