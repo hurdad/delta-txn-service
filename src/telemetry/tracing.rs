@@ -1,9 +1,10 @@
 use std::env;
 
 use opentelemetry::global;
+use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::KeyValue;
-use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
+use opentelemetry_sdk::trace::SdkTracerProvider;
 use opentelemetry_sdk::resource::Resource;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -13,13 +14,13 @@ const DEFAULT_SERVICE_NAME: &str = "delta-txn-service";
 
 pub struct TelemetryGuard {
     meter_provider: Option<SdkMeterProvider>,
-    tracer_enabled: bool,
+    tracer_provider: Option<SdkTracerProvider>,
 }
 
 impl Drop for TelemetryGuard {
     fn drop(&mut self) {
-        if self.tracer_enabled {
-            global::shutdown_tracer_provider();
+        if let Some(provider) = self.tracer_provider.take() {
+            let _ = provider.shutdown();
         }
 
         if let Some(provider) = self.meter_provider.take() {
@@ -34,7 +35,7 @@ pub fn init_tracing() -> TelemetryGuard {
 
     let mut guard = TelemetryGuard {
         meter_provider: None,
-        tracer_enabled: false,
+        tracer_provider: None,
     };
 
     if otel_export_enabled() {
@@ -42,25 +43,35 @@ pub fn init_tracing() -> TelemetryGuard {
             env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| DEFAULT_SERVICE_NAME.to_string());
         let resource = Resource::new(vec![KeyValue::new("service.name", service_name)]);
 
-        let tracer = opentelemetry_otlp::new_pipeline()
-            .tracing()
-            .with_exporter(opentelemetry_otlp::new_exporter().tonic())
-            .with_trace_config(
-                opentelemetry_sdk::trace::Config::default().with_resource(resource.clone()),
-            )
-            .install_batch(opentelemetry_sdk::runtime::Tokio)
-            .ok();
+        let tracer = opentelemetry_otlp::SpanExporter::builder()
+            .with_tonic()
+            .build()
+            .ok()
+            .map(|exporter| {
+                let provider = SdkTracerProvider::builder()
+                    .with_batch_exporter(exporter)
+                    .with_resource(resource.clone())
+                    .build();
+                let tracer = provider.tracer(DEFAULT_SERVICE_NAME);
+                global::set_tracer_provider(provider.clone());
+                guard.tracer_provider = Some(provider);
+                tracer
+            });
         let otel_layer = tracer
             .as_ref()
             .map(|tracer| tracing_opentelemetry::layer().with_tracer(tracer.clone()));
-        guard.tracer_enabled = tracer.is_some();
 
-        let meter_provider = opentelemetry_otlp::new_pipeline()
-            .metrics()
-            .with_exporter(opentelemetry_otlp::new_exporter().tonic())
-            .with_resource(resource)
+        let meter_provider = opentelemetry_otlp::MetricExporter::builder()
+            .with_tonic()
             .build()
-            .ok();
+            .ok()
+            .map(|exporter| {
+                let provider = SdkMeterProvider::builder()
+                    .with_periodic_exporter(exporter)
+                    .with_resource(resource)
+                    .build();
+                provider
+            });
 
         if let Some(provider) = meter_provider.clone() {
             global::set_meter_provider(provider.clone());
