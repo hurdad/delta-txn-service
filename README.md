@@ -183,7 +183,6 @@ This is **significantly faster and more predictable** than Python-based coordina
 
 - Centralized Delta commit coordinator
 - Arrow / C++ data pipelines
-- Flow-Pipe style DAG runtimes
 - Lightweight Delta metadata services
 - Edge / ARM64 environments
 
@@ -209,5 +208,3 @@ Apache License 2.0
 ## Status
 
 This project is **intentionally small and focused**.
-
-I
