@@ -16,7 +16,7 @@ fn map_action(action: pb::Action) -> Result<Action, String> {
             size: a.size,
             modification_time: a.modification_time,
             partition_values: map_string_map(a.partition_values),
-            data_change: map_data_change(a.data_change),
+            data_change: map_data_change(a.data_change)?,
             stats: None,
             tags: map_optional_string_map(a.tags),
             deletion_vector: None,
@@ -28,7 +28,7 @@ fn map_action(action: pb::Action) -> Result<Action, String> {
         PbAction::Remove(r) => Ok(Action::Remove(Remove {
             path: r.path,
             deletion_timestamp: r.deletion_timestamp,
-            data_change: map_data_change(r.data_change),
+            data_change: map_data_change(r.data_change)?,
             extended_file_metadata: None,
             partition_values: None,
             size: None,
@@ -46,8 +46,13 @@ fn map_action(action: pb::Action) -> Result<Action, String> {
     }
 }
 
-fn map_data_change(dc: i32) -> bool {
-    matches!(pb::DataChange::try_from(dc), Ok(pb::DataChange::True))
+fn map_data_change(dc: i32) -> Result<bool, String> {
+    match pb::DataChange::try_from(dc) {
+        Ok(pb::DataChange::True) => Ok(true),
+        Ok(pb::DataChange::False) => Ok(false),
+        Ok(pb::DataChange::Unspecified) => Err("data_change is unspecified".to_string()),
+        Err(_) => Err(format!("invalid data_change value: {dc}")),
+    }
 }
 
 fn map_string_map(
