@@ -8,7 +8,7 @@ use delta_txn_service::telemetry::tracing::init_tracing;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    init_tracing();
+    let _telemetry_guard = init_tracing();
 
     let addr_env = std::env::var("DELTA_TXN_GRPC_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:50051".to_string());
