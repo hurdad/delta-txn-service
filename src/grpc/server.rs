@@ -47,7 +47,9 @@ impl DeltaTxnService for DeltaTxnGrpcServer {
             .map_err(|e| Status::internal(e.to_string()))?;
 
         if let Some(expected) = r.expected_version {
-            let current = table.version() as i64;
+            let current = table
+                .version()
+                .ok_or_else(|| Status::failed_precondition("table not initialized"))?;
             if current != expected {
                 return Err(Status::aborted(format!(
                     "version conflict: expected {}, found {}",
