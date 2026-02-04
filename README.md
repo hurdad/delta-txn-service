@@ -55,7 +55,7 @@ This service is responsible for **metadata correctness**.
 ## Architecture
 
 ```
-Writer (Spark / Arrow / Flow-Pipe)
+Writer (Spark / Arrow / etc)
         |
         |  gRPC (CommitRequest)
         v
