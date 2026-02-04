@@ -1,0 +1,178 @@
+syntax = "proto3";
+
+package delta.txn.v1;
+
+// ======================================================
+// Service
+// ======================================================
+
+service DeltaTxnService {
+  rpc GetTable(GetTableRequest) returns (GetTableResponse);
+  rpc Commit(CommitRequest) returns (CommitResponse);
+}
+
+// ======================================================
+// Table inspection
+// ======================================================
+
+message GetTableRequest {
+  string table_uri = 1;
+}
+
+message GetTableResponse {
+  int64 version = 1;
+  TableMetadata metadata = 2;
+  Protocol protocol = 3;
+}
+
+// ======================================================
+// Commit
+// ======================================================
+
+message CommitRequest {
+  string table_uri = 1;
+
+  // Optimistic concurrency check
+  optional int64 expected_version = 2;
+
+  // Ordered Delta actions
+  repeated Action actions = 3;
+
+  // Optional commitInfo metadata
+  map<string, string> app_metadata = 4;
+}
+
+message CommitResponse {
+  int64 committed_version = 1;
+}
+
+// ======================================================
+// Delta Actions
+// ======================================================
+
+message Action {
+  oneof action {
+    AddFile add = 1;
+    RemoveFile remove = 2;
+    Protocol protocol = 3;
+    TableMetadata meta_data = 4;
+    CommitInfo commit_info = 5;
+  }
+}
+
+// ======================================================
+// Enums
+// ======================================================
+
+enum CommitOperation {
+  COMMIT_OPERATION_UNSPECIFIED = 0;
+
+  COMMIT_OPERATION_WRITE = 1;
+  COMMIT_OPERATION_MERGE = 2;
+  COMMIT_OPERATION_UPDATE = 3;
+  COMMIT_OPERATION_DELETE = 4;
+  COMMIT_OPERATION_OPTIMIZE = 5;
+  COMMIT_OPERATION_VACUUM = 6;
+  COMMIT_OPERATION_RESTORE = 7;
+  COMMIT_OPERATION_CONVERT = 8;
+}
+
+enum DataChange {
+  DATA_CHANGE_UNSPECIFIED = 0;
+  DATA_CHANGE_TRUE = 1;
+  DATA_CHANGE_FALSE = 2;
+}
+
+// ======================================================
+// Add / Remove
+// ======================================================
+
+message AddFile {
+  string path = 1;
+
+  int64 size = 2;
+  int64 modification_time = 3;
+
+  // Partition values encoded as strings (Delta spec)
+  map<string, string> partition_values = 4;
+
+  DataChange data_change = 5;
+
+  FileStats stats = 6;
+
+  map<string, string> tags = 7;
+}
+
+message RemoveFile {
+  string path = 1;
+  optional int64 deletion_timestamp = 2;
+  DataChange data_change = 3;
+}
+
+// ======================================================
+// Protocol & Metadata
+// ======================================================
+
+message Protocol {
+  int32 min_reader_version = 1;
+  int32 min_writer_version = 2;
+}
+
+message TableMetadata {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+
+  // Serialized Arrow / Spark schema JSON (Delta-compatible)
+  string schema_string = 4;
+
+  repeated string partition_columns = 5;
+
+  map<string, string> configuration = 6;
+
+  int64 created_time = 7;
+}
+
+// ======================================================
+// CommitInfo
+// ======================================================
+
+message CommitInfo {
+  string engine_name = 1;
+  string engine_version = 2;
+
+  CommitOperation operation = 3;
+
+  map<string, string> operation_parameters = 4;
+  map<string, string> user_metadata = 5;
+
+  int64 timestamp = 6;
+}
+
+// ======================================================
+// File Statistics (structured, not JSON)
+// ======================================================
+
+message FileStats {
+  int64 num_records = 1;
+
+  map<string, ColumnStats> columns = 2;
+}
+
+message ColumnStats {
+  oneof min_value {
+    int64 min_int = 1;
+    double min_double = 2;
+    string min_string = 3;
+    bool min_bool = 4;
+  }
+
+  oneof max_value {
+    int64 max_int = 5;
+    double max_double = 6;
+    string max_string = 7;
+    bool max_bool = 8;
+  }
+
+  int64 null_count = 9;
+}

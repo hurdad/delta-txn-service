@@ -1,0 +1,47 @@
+[package]
+name = "delta-txn-service"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+# -----------------------------
+# Async runtime
+# -----------------------------
+tokio = { version = "1.36", features = ["macros", "rt-multi-thread"] }
+
+# -----------------------------
+# gRPC / Protobuf
+# -----------------------------
+tonic = "0.12"
+prost = "0.13"
+prost-types = "0.13"
+
+# -----------------------------
+# Delta Lake (native)
+# -----------------------------
+deltalake = { version = "0.20", features = ["s3", "datafusion"] }
+
+# -----------------------------
+# Concurrency / locking
+# -----------------------------
+dashmap = "6"
+
+# -----------------------------
+# Serialization / utilities
+# -----------------------------
+thiserror = "1"
+
+# -----------------------------
+# Observability
+# -----------------------------
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[build-dependencies]
+tonic-build = "0.12"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
