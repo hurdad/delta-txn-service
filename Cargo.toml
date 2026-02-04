@@ -8,38 +8,38 @@ license = "Apache-2.0"
 # -----------------------------
 # Async runtime
 # -----------------------------
-tokio = { version = "1.36", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread"] }
 
 # -----------------------------
 # gRPC / Protobuf
 # -----------------------------
-tonic = "0.12"
-prost = "0.13"
-prost-types = "0.13"
+tonic = "0.14.3"
+prost = "0.14.3"
+prost-types = "0.14.3"
 
 # -----------------------------
 # Delta Lake (native)
 # -----------------------------
-deltalake = { version = "0.20", features = ["s3", "datafusion"] }
+deltalake = { version = "0.30.1", features = ["s3", "datafusion"] }
 
 # -----------------------------
 # Concurrency / locking
 # -----------------------------
-dashmap = "6"
+dashmap = "6.1.0"
 
 # -----------------------------
 # Serialization / utilities
 # -----------------------------
-thiserror = "1"
+thiserror = "1.0.69"
 
 # -----------------------------
 # Observability
 # -----------------------------
-tracing = "0.1"
-tracing-subscriber = "0.3"
+tracing = "0.1.44"
+tracing-subscriber = "0.3.22"
 
 [build-dependencies]
-tonic-build = "0.12"
+tonic-build = "0.14.3"
 
 [profile.release]
 lto = true

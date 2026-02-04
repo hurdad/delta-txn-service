@@ -1,7 +1,7 @@
 # ======================================================
 # Builder
 # ======================================================
-FROM rust:1.75-bookworm AS builder
+FROM rust:1.93-trixie AS builder
 
 WORKDIR /build
 
@@ -33,7 +33,7 @@ RUN cargo build --release
 # ======================================================
 # Runtime
 # ======================================================
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 WORKDIR /app
 
