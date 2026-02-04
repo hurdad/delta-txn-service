@@ -32,6 +32,7 @@ dashmap = "6.1.0"
 # Serialization / utilities
 # -----------------------------
 thiserror = "2.0.18"
+serde_json = "1.0.149"
 
 # -----------------------------
 # Observability
