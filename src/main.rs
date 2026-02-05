@@ -5,7 +5,7 @@ use tracing::info;
 use delta_txn_service::config::grpc::load_grpc_config;
 use delta_txn_service::grpc::server::pb::delta_txn_service_server::DeltaTxnServiceServer;
 use delta_txn_service::grpc::server::DeltaTxnGrpcServer;
-use delta_txn_service::telemetry::grpc_metrics::GrpcMetricsLayer;
+use delta_txn_service::telemetry::metrics::GrpcMetricsLayer;
 use delta_txn_service::telemetry::tracing::init_tracing;
 
 fn make_auth_interceptor(
