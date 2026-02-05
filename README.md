@@ -243,17 +243,6 @@ This is **significantly faster and more predictable** than Python-based coordina
 
 ---
 
-## Roadmap (non-binding)
-
-- Idempotent `TxnId`
-- Commit batching / coalescing
-- Leader election / fencing
-- Arrow schema protobuf
-- Arrow Flight data ingestion
-- OpenTelemetry metrics export
-
----
-
 ## License
 
 Apache License 2.0
