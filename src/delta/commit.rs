@@ -1,7 +1,7 @@
+use super::errors::DeltaTxnError;
 use deltalake::kernel::transaction::{CommitBuilder, TableReference};
 use deltalake::kernel::Action;
 use deltalake::protocol::{DeltaOperation, SaveMode};
-use super::errors::DeltaTxnError;
 
 pub async fn commit_actions(
     table: deltalake::DeltaTable,

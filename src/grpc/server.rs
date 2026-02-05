@@ -59,8 +59,7 @@ impl DeltaTxnService for DeltaTxnGrpcServer {
             }
         }
 
-        let actions = map_actions(r.actions)
-            .map_err(|e| Status::invalid_argument(e))?;
+        let actions = map_actions(r.actions).map_err(|e| Status::invalid_argument(e))?;
 
         let version = commit_actions(table, actions)
             .await
@@ -84,9 +83,7 @@ impl DeltaTxnService for DeltaTxnGrpcServer {
             .map_err(|e| Status::internal(e.to_string()))?;
 
         let snapshot = table.snapshot().map_err(|e| match e {
-            DeltaTableError::NotInitialized => {
-                Status::failed_precondition("table not initialized")
-            }
+            DeltaTableError::NotInitialized => Status::failed_precondition("table not initialized"),
             _ => Status::internal(e.to_string()),
         })?;
 
