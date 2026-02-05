@@ -3,13 +3,13 @@ use std::time::Instant;
 use std::future::Future;
 use std::pin::Pin;
 
+use http_body::Body;
 use opentelemetry::metrics::{Counter, Histogram, Meter};
 use opentelemetry::KeyValue;
 use tonic::body::Body as TonicBody;
 use tonic::codegen::http::{Request, Response};
 use tonic::Code;
 use tower::{Layer, Service};
-use http_body::Body;
 
 #[derive(Clone)]
 pub struct GrpcMetricsLayer {
@@ -87,11 +87,7 @@ where
         let error_counter = self.error_counter.clone();
         let latency_histogram = self.latency_histogram.clone();
         let path = req.uri().path();
-        let method = path
-            .rsplit('/')
-            .next()
-            .unwrap_or("unknown")
-            .to_string();
+        let method = path.rsplit('/').next().unwrap_or("unknown").to_string();
         let service = path
             .rsplitn(2, '/')
             .last()
