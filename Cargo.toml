@@ -17,6 +17,8 @@ tonic = "0.14.3"
 tonic-prost = "0.14.3"
 prost = "0.14.3"
 prost-types = "0.14.3"
+tower = "0.5.2"
+http-body = "1.0.1"
 
 # -----------------------------
 # Delta Lake (native)

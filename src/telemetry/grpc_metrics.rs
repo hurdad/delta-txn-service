@@ -5,9 +5,11 @@ use std::pin::Pin;
 
 use opentelemetry::metrics::{Counter, Histogram, Meter};
 use opentelemetry::KeyValue;
-use tonic::body::BoxBody;
-use tonic::{Code, Request, Response};
+use tonic::body::Body as TonicBody;
+use tonic::codegen::http::{Request, Response};
+use tonic::Code;
 use tower::{Layer, Service};
+use http_body::Body;
 
 #[derive(Clone)]
 pub struct GrpcMetricsLayer {
@@ -41,16 +43,16 @@ impl<S> GrpcMetricsService<S> {
         let request_counter = meter
             .u64_counter("grpc.server.requests")
             .with_description("Total gRPC requests received.")
-            .init();
+            .build();
         let error_counter = meter
             .u64_counter("grpc.server.errors")
             .with_description("Total gRPC requests that returned non-OK status.")
-            .init();
+            .build();
         let latency_histogram = meter
             .f64_histogram("grpc.server.latency_ms")
             .with_description("gRPC server latency in milliseconds.")
             .with_unit("ms")
-            .init();
+            .build();
 
         Self {
             inner,
@@ -61,11 +63,12 @@ impl<S> GrpcMetricsService<S> {
     }
 }
 
-impl<S, B> Service<Request<B>> for GrpcMetricsService<S>
+impl<S, R> Service<Request<TonicBody>> for GrpcMetricsService<S>
 where
-    S: Service<Request<B>, Response = Response<BoxBody>> + Clone + Send + 'static,
+    S: Service<Request<TonicBody>, Response = Response<R>> + Clone + Send + 'static,
     S::Future: Send + 'static,
-    B: Send + 'static,
+    S::Error: Send + 'static,
+    R: Body + Send + 'static,
 {
     type Response = S::Response;
     type Error = S::Error;
@@ -78,7 +81,7 @@ where
         self.inner.poll_ready(cx)
     }
 
-    fn call(&mut self, req: Request<B>) -> Self::Future {
+    fn call(&mut self, req: Request<TonicBody>) -> Self::Future {
         let mut inner = self.inner.clone();
         let request_counter = self.request_counter.clone();
         let error_counter = self.error_counter.clone();
@@ -103,8 +106,16 @@ where
 
             let (status_code, is_error) = match &response {
                 Ok(resp) => {
-                    let code = Code::from(resp.status());
-                    (code, code != Code::Ok)
+                    let status = tonic::Status::from_header_map(resp.headers())
+                        .map(|status| status.code())
+                        .unwrap_or_else(|| {
+                            if resp.status() == tonic::codegen::http::StatusCode::OK {
+                                Code::Ok
+                            } else {
+                                Code::Unknown
+                            }
+                        });
+                    (status, status != Code::Ok)
                 }
                 Err(_err) => (Code::Unknown, true),
             };
