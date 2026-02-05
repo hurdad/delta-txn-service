@@ -122,6 +122,28 @@ AWS_ALLOW_HTTP=true
 
 ---
 
+## Configuration (environment variables)
+
+### gRPC
+- `DELTA_TXN_GRPC_ADDR`: Bind address for the gRPC server (default: `0.0.0.0:50051`).
+- `DELTA_TXN_GRPC_TLS_CERT`: Path to a PEM-encoded TLS certificate for gRPC.
+- `DELTA_TXN_GRPC_TLS_KEY`: Path to a PEM-encoded TLS private key for gRPC.
+- `DELTA_TXN_GRPC_API_KEY`: Optional API key for gRPC auth (clients send `x-api-key` or `authorization: Bearer ...`).
+
+### Storage (object-store)
+- `AWS_*`: All `AWS_` environment variables are forwarded to `delta-rs` object-store configuration
+  (e.g. `AWS_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`,
+  `AWS_ALLOW_HTTP`).
+
+### Telemetry (OpenTelemetry)
+- `OTEL_SERVICE_NAME`: Service name used in traces/metrics (default: `delta-txn-service`).
+- `OTEL_EXPORTER_OTLP_PROTOCOL`: Export protocol (`grpc`, `http/protobuf`, or `http/json`).
+- `OTEL_EXPORTER_OTLP_ENDPOINT`: Shared OTLP endpoint for traces + metrics.
+- `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`: Overrides traces endpoint.
+- `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`: Overrides metrics endpoint.
+
+---
+
 ## Running locally
 
 ### Build
@@ -158,6 +180,20 @@ DELTA_TXN_GRPC_API_KEY=super-secret
 docker build -t delta-txn-service .
 docker run -p 50051:50051 delta-txn-service
 ```
+
+---
+
+## Metrics
+
+When OTLP export is enabled (set any `OTEL_EXPORTER_OTLP_*` endpoint), the service emits
+gRPC server metrics via OpenTelemetry:
+
+- `grpc.server.requests` (counter): total gRPC requests received.
+- `grpc.server.errors` (counter): total gRPC requests that returned non-OK status.
+- `grpc.server.latency_ms` (histogram, unit `ms`): end-to-end gRPC handler latency.
+
+All metrics include standard RPC attributes:
+`rpc.system`, `rpc.service`, `rpc.method`, and `rpc.grpc.status_code`.
 
 ---
 
