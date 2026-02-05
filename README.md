@@ -135,6 +135,24 @@ DELTA_TXN_GRPC_ADDR=0.0.0.0:50051 ./target/release/delta-txn-service
 ```
 Set `DELTA_TXN_GRPC_ADDR` to change the gRPC bind address (default `0.0.0.0:50051`).
 
+#### gRPC TLS
+
+Provide both certificate and key files to enable TLS:
+
+```bash
+DELTA_TXN_GRPC_TLS_CERT=/path/to/server.crt
+DELTA_TXN_GRPC_TLS_KEY=/path/to/server.key
+```
+
+#### gRPC API key auth
+
+Set an API key to require authentication for all gRPC calls. Clients must send it as an
+`x-api-key` metadata header or as a `Bearer` token in the `authorization` header.
+
+```bash
+DELTA_TXN_GRPC_API_KEY=super-secret
+```
+
 ### Docker
 ```bash
 docker build -t delta-txn-service .
