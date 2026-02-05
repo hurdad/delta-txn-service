@@ -178,3 +178,86 @@ fn map_commit_operation(operation: i32) -> Option<String> {
         pb::CommitOperation::Unspecified => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn map_data_change_maps_valid_values() {
+        assert_eq!(
+            map_data_change(pb::DataChange::True as i32).unwrap(),
+            true
+        );
+        assert_eq!(
+            map_data_change(pb::DataChange::False as i32).unwrap(),
+            false
+        );
+    }
+
+    #[test]
+    fn map_data_change_rejects_unspecified_and_invalid() {
+        let err = map_data_change(pb::DataChange::Unspecified as i32).unwrap_err();
+        assert_eq!(err, "data_change is unspecified");
+
+        let err = map_data_change(99).unwrap_err();
+        assert_eq!(err, "invalid data_change value: 99");
+    }
+
+    #[test]
+    fn map_optional_string_map_respects_empty_inputs() {
+        let empty = HashMap::<String, String>::new();
+        assert!(map_optional_string_map(empty).is_none());
+
+        let mut values = HashMap::new();
+        values.insert("region".to_string(), "us-east-1".to_string());
+        let mapped = map_optional_string_map(values).expect("expected map");
+        assert_eq!(mapped.get("region"), Some(&Some("us-east-1".to_string())));
+    }
+
+    #[test]
+    fn map_engine_info_formats_engine_name_and_version() {
+        assert_eq!(
+            map_engine_info("".to_string(), "".to_string()),
+            None
+        );
+        assert_eq!(
+            map_engine_info("delta".to_string(), "".to_string()),
+            Some("delta".to_string())
+        );
+        assert_eq!(
+            map_engine_info("".to_string(), "1.2.3".to_string()),
+            Some("1.2.3".to_string())
+        );
+        assert_eq!(
+            map_engine_info("delta".to_string(), "1.2.3".to_string()),
+            Some("delta/1.2.3".to_string())
+        );
+    }
+
+    #[test]
+    fn map_commit_operation_handles_known_values() {
+        assert_eq!(
+            map_commit_operation(pb::CommitOperation::Write as i32),
+            Some("WRITE".to_string())
+        );
+        assert_eq!(
+            map_commit_operation(pb::CommitOperation::Unspecified as i32),
+            None
+        );
+        assert_eq!(map_commit_operation(99), None);
+    }
+
+    #[test]
+    fn map_user_metadata_serializes_to_json() {
+        let empty = HashMap::<String, String>::new();
+        assert!(map_user_metadata(empty).unwrap().is_none());
+
+        let mut input = HashMap::new();
+        input.insert("source".to_string(), "unit-test".to_string());
+        let json = map_user_metadata(input).unwrap().expect("expected json");
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value, serde_json::json!({ "source": "unit-test" }));
+    }
+}

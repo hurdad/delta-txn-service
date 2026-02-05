@@ -28,6 +28,8 @@ COPY src ./src
 
 # Build the real binary
 RUN cargo build --release
+# Run tests to validate the build artifacts
+RUN cargo test --release
 
 
 # ======================================================
