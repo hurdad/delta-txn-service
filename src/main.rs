@@ -47,10 +47,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let grpc_config = load_grpc_config()?;
 
     let svc = DeltaTxnGrpcServer::new();
-    let svc = DeltaTxnServiceServer::with_interceptor(
-        svc,
-        make_auth_interceptor(grpc_config.api_key),
-    );
+    let svc =
+        DeltaTxnServiceServer::with_interceptor(svc, make_auth_interceptor(grpc_config.api_key));
 
     let meter = global::meter("delta-txn-service");
     let metrics_layer = GrpcMetricsLayer::new(meter);

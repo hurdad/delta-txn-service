@@ -39,8 +39,8 @@ impl DeltaTxnService for DeltaTxnGrpcServer {
         let r = req.into_inner();
         let table_uri = r.table_uri;
 
-        let normalized_table_uri = ensure_table_uri(&table_uri)
-            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let normalized_table_uri =
+            ensure_table_uri(&table_uri).map_err(|e| Status::invalid_argument(e.to_string()))?;
         let lock = self.locks.lock_for(normalized_table_uri.as_str());
         let _guard = lock.lock().await;
 

@@ -112,10 +112,7 @@ fn build_tracer(
     })
 }
 
-fn build_meter_provider(
-    protocol: Protocol,
-    resource: Resource,
-) -> Option<SdkMeterProvider> {
+fn build_meter_provider(protocol: Protocol, resource: Resource) -> Option<SdkMeterProvider> {
     let exporter = match protocol {
         Protocol::Grpc => opentelemetry_otlp::MetricExporter::builder()
             .with_tonic()

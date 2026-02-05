@@ -28,8 +28,9 @@ pub fn load_grpc_config() -> Result<GrpcConfig, Box<dyn std::error::Error>> {
         }),
         (None, None) => None,
         _ => {
-            return Err("DELTA_TXN_GRPC_TLS_CERT and DELTA_TXN_GRPC_TLS_KEY must both be set"
-                .into())
+            return Err(
+                "DELTA_TXN_GRPC_TLS_CERT and DELTA_TXN_GRPC_TLS_KEY must both be set".into(),
+            )
         }
     };
 
