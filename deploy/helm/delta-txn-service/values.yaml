@@ -1,0 +1,38 @@
+replicaCount: 1
+
+image:
+  repository: delta-txn-service
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 50051
+
+grpc:
+  address: "0.0.0.0:50051"
+  apiKey: ""
+  apiKeySecretName: ""
+  apiKeySecretKey: ""
+  tls:
+    enabled: false
+    secretName: ""
+    certFile: "tls.crt"
+    keyFile: "tls.key"
+    mountPath: "/etc/delta-txn/tls"
+
+storage:
+  aws:
+    AWS_ENDPOINT_URL: ""
+    AWS_ACCESS_KEY_ID: ""
+    AWS_SECRET_ACCESS_KEY: ""
+    AWS_REGION: ""
+    AWS_ALLOW_HTTP: ""
+
+resources: {}
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
