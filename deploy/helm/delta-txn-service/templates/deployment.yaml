@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "delta-txn-service.fullname" . }}
+  labels:
+    {{- include "delta-txn-service.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "delta-txn-service.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        {{- include "delta-txn-service.labels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: delta-txn-service
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: grpc
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          readinessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 5
+          env:
+            - name: DELTA_TXN_GRPC_ADDR
+              value: "{{ .Values.grpc.address }}"
+            {{- if .Values.grpc.apiKeySecretName }}
+            - name: DELTA_TXN_GRPC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.grpc.apiKeySecretName }}
+                  key: {{ .Values.grpc.apiKeySecretKey | default "api-key" }}
+            {{- else if .Values.grpc.apiKey }}
+            - name: DELTA_TXN_GRPC_API_KEY
+              value: "{{ .Values.grpc.apiKey }}"
+            {{- end }}
+            {{- if .Values.grpc.tls.enabled }}
+            - name: DELTA_TXN_GRPC_TLS_CERT
+              value: "{{ .Values.grpc.tls.mountPath }}/{{ .Values.grpc.tls.certFile }}"
+            - name: DELTA_TXN_GRPC_TLS_KEY
+              value: "{{ .Values.grpc.tls.mountPath }}/{{ .Values.grpc.tls.keyFile }}"
+            {{- end }}
+            {{- range $key, $value := .Values.storage.aws }}
+            {{- if $value }}
+            - name: {{ $key }}
+              value: "{{ $value }}"
+            {{- end }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- if .Values.grpc.tls.enabled }}
+          volumeMounts:
+            - name: grpc-tls
+              mountPath: "{{ .Values.grpc.tls.mountPath }}"
+              readOnly: true
+          {{- end }}
+      {{- if .Values.grpc.tls.enabled }}
+      volumes:
+        - name: grpc-tls
+          secret:
+            secretName: {{ .Values.grpc.tls.secretName }}
+      {{- end }}
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
+      tolerations:
+        {{- toYaml .Values.tolerations | nindent 8 }}
+      affinity:
+        {{- toYaml .Values.affinity | nindent 8 }}
