@@ -1,4 +1,4 @@
-use deltalake::DeltaTableError;
+use deltalake::{ensure_table_uri, DeltaTableError};
 use tonic::{Request, Response, Status};
 
 use crate::config::storage::load_storage_options;
@@ -39,11 +39,13 @@ impl DeltaTxnService for DeltaTxnGrpcServer {
         let r = req.into_inner();
         let table_uri = r.table_uri;
 
-        let lock = self.locks.lock_for(&table_uri);
+        let normalized_table_uri = ensure_table_uri(&table_uri)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let lock = self.locks.lock_for(normalized_table_uri.as_str());
         let _guard = lock.lock().await;
 
         let storage_opts = load_storage_options();
-        let table = open_table(&table_uri, storage_opts)
+        let table = open_table(normalized_table_uri.as_str(), storage_opts)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
