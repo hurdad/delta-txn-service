@@ -3,6 +3,7 @@ use std::env;
 use opentelemetry::global;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::KeyValue;
+use opentelemetry_otlp::{Protocol, WithExportConfig};
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use opentelemetry_sdk::resource::Resource;
 use opentelemetry_sdk::trace::SdkTracerProvider;
@@ -45,35 +46,13 @@ pub fn init_tracing() -> TelemetryGuard {
             .with_attributes([KeyValue::new("service.name", service_name)])
             .build();
 
-        let tracer = opentelemetry_otlp::SpanExporter::builder()
-            .with_tonic()
-            .build()
-            .ok()
-            .map(|exporter| {
-                let provider = SdkTracerProvider::builder()
-                    .with_batch_exporter(exporter)
-                    .with_resource(resource.clone())
-                    .build();
-                let tracer = provider.tracer(DEFAULT_SERVICE_NAME);
-                global::set_tracer_provider(provider.clone());
-                guard.tracer_provider = Some(provider);
-                tracer
-            });
+        let protocol = otel_protocol();
+        let tracer = build_tracer(protocol, resource.clone(), &mut guard);
         let otel_layer = tracer
             .as_ref()
             .map(|tracer| tracing_opentelemetry::layer().with_tracer(tracer.clone()));
 
-        let meter_provider = opentelemetry_otlp::MetricExporter::builder()
-            .with_tonic()
-            .build()
-            .ok()
-            .map(|exporter| {
-                let provider = SdkMeterProvider::builder()
-                    .with_periodic_exporter(exporter)
-                    .with_resource(resource)
-                    .build();
-                provider
-            });
+        let meter_provider = build_meter_provider(protocol, resource);
 
         if let Some(provider) = meter_provider.clone() {
             global::set_meter_provider(provider.clone());
@@ -96,6 +75,84 @@ pub fn init_tracing() -> TelemetryGuard {
     }
 
     guard
+}
+
+fn build_tracer(
+    protocol: Protocol,
+    resource: Resource,
+    guard: &mut TelemetryGuard,
+) -> Option<opentelemetry_sdk::trace::Tracer> {
+    let exporter = match protocol {
+        Protocol::Grpc => opentelemetry_otlp::SpanExporter::builder()
+            .with_tonic()
+            .with_protocol(Protocol::Grpc)
+            .build()
+            .ok(),
+        Protocol::HttpBinary => opentelemetry_otlp::SpanExporter::builder()
+            .with_http()
+            .with_protocol(Protocol::HttpBinary)
+            .build()
+            .ok(),
+        Protocol::HttpJson => opentelemetry_otlp::SpanExporter::builder()
+            .with_http()
+            .with_protocol(Protocol::HttpJson)
+            .build()
+            .ok(),
+    };
+
+    exporter.map(|exporter| {
+        let provider = SdkTracerProvider::builder()
+            .with_batch_exporter(exporter)
+            .with_resource(resource)
+            .build();
+        let tracer = provider.tracer(DEFAULT_SERVICE_NAME);
+        global::set_tracer_provider(provider.clone());
+        guard.tracer_provider = Some(provider);
+        tracer
+    })
+}
+
+fn build_meter_provider(
+    protocol: Protocol,
+    resource: Resource,
+) -> Option<SdkMeterProvider> {
+    let exporter = match protocol {
+        Protocol::Grpc => opentelemetry_otlp::MetricExporter::builder()
+            .with_tonic()
+            .with_protocol(Protocol::Grpc)
+            .build()
+            .ok(),
+        Protocol::HttpBinary => opentelemetry_otlp::MetricExporter::builder()
+            .with_http()
+            .with_protocol(Protocol::HttpBinary)
+            .build()
+            .ok(),
+        Protocol::HttpJson => opentelemetry_otlp::MetricExporter::builder()
+            .with_http()
+            .with_protocol(Protocol::HttpJson)
+            .build()
+            .ok(),
+    };
+
+    exporter.map(|exporter| {
+        SdkMeterProvider::builder()
+            .with_periodic_exporter(exporter)
+            .with_resource(resource)
+            .build()
+    })
+}
+
+fn otel_protocol() -> Protocol {
+    let protocol = env::var("OTEL_EXPORTER_OTLP_PROTOCOL")
+        .unwrap_or_else(|_| "grpc".to_string())
+        .to_lowercase();
+
+    match protocol.as_str() {
+        "grpc" => Protocol::Grpc,
+        "http/protobuf" | "http-protobuf" | "http" => Protocol::HttpBinary,
+        "http/json" | "http-json" => Protocol::HttpJson,
+        _ => Protocol::Grpc,
+    }
 }
 
 fn otel_export_enabled() -> bool {
