@@ -41,7 +41,9 @@ pub fn init_tracing() -> TelemetryGuard {
     if otel_export_enabled() {
         let service_name =
             env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| DEFAULT_SERVICE_NAME.to_string());
-        let resource = Resource::new(vec![KeyValue::new("service.name", service_name)]);
+        let resource = Resource::builder_empty()
+            .with_attributes([KeyValue::new("service.name", service_name)])
+            .build();
 
         let tracer = opentelemetry_otlp::SpanExporter::builder()
             .with_tonic()
