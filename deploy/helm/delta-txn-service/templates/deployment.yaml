@@ -15,10 +15,14 @@ spec:
       labels:
         {{- include "delta-txn-service.labels" . | nindent 8 }}
     spec:
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
         - name: delta-txn-service
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
           ports:
             - name: grpc
               containerPort: {{ .Values.service.port }}
@@ -60,20 +64,28 @@ spec:
               value: "{{ $value }}"
             {{- end }}
             {{- end }}
+            {{- if .Values.security.allowedTablePrefixes }}
+            - name: DELTA_TXN_ALLOWED_TABLE_PREFIXES
+              value: "{{ join "," .Values.security.allowedTablePrefixes }}"
+            {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-          {{- if .Values.grpc.tls.enabled }}
           volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.grpc.tls.enabled }}
             - name: grpc-tls
               mountPath: "{{ .Values.grpc.tls.mountPath }}"
               readOnly: true
-          {{- end }}
-      {{- if .Values.grpc.tls.enabled }}
+            {{- end }}
       volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- if .Values.grpc.tls.enabled }}
         - name: grpc-tls
           secret:
             secretName: {{ .Values.grpc.tls.secretName }}
-      {{- end }}
+        {{- end }}
       nodeSelector:
         {{- toYaml .Values.nodeSelector | nindent 8 }}
       tolerations:

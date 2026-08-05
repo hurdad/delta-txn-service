@@ -11,6 +11,9 @@ service:
 
 grpc:
   address: "0.0.0.0:50051"
+  # WARNING: apiKey is rendered in plaintext into the Deployment's env vars and is
+  # stored in plaintext in the Helm release. Use apiKeySecretName for anything
+  # beyond local testing.
   apiKey: ""
   apiKeySecretName: ""
   apiKeySecretKey: ""
@@ -29,7 +32,33 @@ storage:
     AWS_REGION: ""
     AWS_ALLOW_HTTP: ""
 
-resources: {}
+security:
+  # Comma-joined into DELTA_TXN_ALLOWED_TABLE_PREFIXES. Empty means any table_uri
+  # a client supplies is permitted (unrestricted, historical behavior).
+  allowedTablePrefixes: []
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
 
 nodeSelector: {}
 

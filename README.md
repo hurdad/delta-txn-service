@@ -129,6 +129,10 @@ AWS_ALLOW_HTTP=true
 - `DELTA_TXN_GRPC_TLS_CERT`: Path to a PEM-encoded TLS certificate for gRPC.
 - `DELTA_TXN_GRPC_TLS_KEY`: Path to a PEM-encoded TLS private key for gRPC.
 - `DELTA_TXN_GRPC_API_KEY`: Optional API key for gRPC auth (clients send `x-api-key` or `authorization: Bearer ...`).
+- `DELTA_TXN_ALLOWED_TABLE_PREFIXES`: Optional comma-separated list of `table_uri` prefixes. When set, `Commit` and
+  `GetTable` reject any `table_uri` that doesn't start with one of these prefixes. When unset (the default), a client
+  may address any table URI the server's storage credentials can reach — set this in any deployment where the
+  API key/network boundary isn't trusted to scope table access on its own.
 
 ### Storage (object-store)
 - `AWS_*`: All `AWS_` environment variables are forwarded to `delta-rs` object-store configuration

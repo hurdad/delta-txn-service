@@ -3,42 +3,11 @@ use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tracing::info;
 
 use delta_txn_service::config::grpc::load_grpc_config;
+use delta_txn_service::grpc::auth::make_auth_interceptor;
 use delta_txn_service::grpc::server::pb::delta_txn_service_server::DeltaTxnServiceServer;
 use delta_txn_service::grpc::server::DeltaTxnGrpcServer;
 use delta_txn_service::telemetry::metrics::GrpcMetricsLayer;
 use delta_txn_service::telemetry::tracing::init_tracing;
-
-fn make_auth_interceptor(
-    api_key: Option<String>,
-) -> impl Fn(tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> + Clone {
-    move |req: tonic::Request<()>| {
-        let Some(api_key) = api_key.as_deref() else {
-            return Ok(req);
-        };
-
-        let metadata = req.metadata();
-        let mut authorized = metadata
-            .get("x-api-key")
-            .and_then(|value| value.to_str().ok())
-            .map(|value| value == api_key)
-            .unwrap_or(false);
-
-        if !authorized {
-            authorized = metadata
-                .get("authorization")
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.strip_prefix("Bearer "))
-                .map(|value| value == api_key)
-                .unwrap_or(false);
-        }
-
-        if authorized {
-            Ok(req)
-        } else {
-            Err(tonic::Status::unauthenticated("missing or invalid api key"))
-        }
-    }
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

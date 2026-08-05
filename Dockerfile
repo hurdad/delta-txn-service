@@ -43,7 +43,8 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --no-create-home --uid 10001 delta-txn
 
 # ---- IMPORTANT ----
 # Adjust the binary name here if you rename the crate
@@ -56,5 +57,7 @@ EXPOSE 50051
 
 ENV RUST_LOG=info \
     AWS_REGION=us-east-1
+
+USER delta-txn
 
 ENTRYPOINT ["/usr/local/bin/delta-txn-service"]

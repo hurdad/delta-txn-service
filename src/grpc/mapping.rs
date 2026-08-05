@@ -17,7 +17,7 @@ fn map_action(action: pb::Action) -> Result<Action, String> {
             modification_time: a.modification_time,
             partition_values: map_string_map(a.partition_values),
             data_change: map_data_change(a.data_change)?,
-            stats: None,
+            stats: map_file_stats(a.stats),
             tags: map_optional_string_map(a.tags),
             deletion_vector: None,
             base_row_id: None,
@@ -52,6 +52,53 @@ fn map_data_change(dc: i32) -> Result<bool, String> {
         Ok(pb::DataChange::False) => Ok(false),
         Ok(pb::DataChange::Unspecified) => Err("data_change is unspecified".to_string()),
         Err(_) => Err(format!("invalid data_change value: {dc}")),
+    }
+}
+
+fn map_file_stats(stats: Option<pb::FileStats>) -> Option<String> {
+    let stats = stats?;
+
+    let mut min_values = serde_json::Map::new();
+    let mut max_values = serde_json::Map::new();
+    let mut null_count = serde_json::Map::new();
+
+    for (column, column_stats) in stats.columns {
+        if let Some(min) = map_column_min_value(column_stats.min_value) {
+            min_values.insert(column.clone(), min);
+        }
+        if let Some(max) = map_column_max_value(column_stats.max_value) {
+            max_values.insert(column.clone(), max);
+        }
+        null_count.insert(column, Value::from(column_stats.null_count));
+    }
+
+    let json = serde_json::json!({
+        "numRecords": stats.num_records,
+        "minValues": min_values,
+        "maxValues": max_values,
+        "nullCount": null_count,
+    });
+
+    serde_json::to_string(&json).ok()
+}
+
+fn map_column_min_value(value: Option<pb::column_stats::MinValue>) -> Option<Value> {
+    use pb::column_stats::MinValue;
+    match value? {
+        MinValue::MinInt(v) => Some(Value::from(v)),
+        MinValue::MinDouble(v) => serde_json::Number::from_f64(v).map(Value::Number),
+        MinValue::MinString(v) => Some(Value::String(v)),
+        MinValue::MinBool(v) => Some(Value::Bool(v)),
+    }
+}
+
+fn map_column_max_value(value: Option<pb::column_stats::MaxValue>) -> Option<Value> {
+    use pb::column_stats::MaxValue;
+    match value? {
+        MaxValue::MaxInt(v) => Some(Value::from(v)),
+        MaxValue::MaxDouble(v) => serde_json::Number::from_f64(v).map(Value::Number),
+        MaxValue::MaxString(v) => Some(Value::String(v)),
+        MaxValue::MaxBool(v) => Some(Value::Bool(v)),
     }
 }
 
@@ -247,6 +294,48 @@ mod tests {
             None
         );
         assert_eq!(map_commit_operation(99), None);
+    }
+
+    #[test]
+    fn map_file_stats_returns_none_when_absent() {
+        assert!(map_file_stats(None).is_none());
+    }
+
+    #[test]
+    fn map_file_stats_serializes_min_max_and_null_counts() {
+        let mut columns = HashMap::new();
+        columns.insert(
+            "id".to_string(),
+            pb::ColumnStats {
+                min_value: Some(pb::column_stats::MinValue::MinInt(1)),
+                max_value: Some(pb::column_stats::MaxValue::MaxInt(100)),
+                null_count: 0,
+            },
+        );
+        columns.insert(
+            "name".to_string(),
+            pb::ColumnStats {
+                min_value: Some(pb::column_stats::MinValue::MinString("a".to_string())),
+                max_value: Some(pb::column_stats::MaxValue::MaxString("z".to_string())),
+                null_count: 3,
+            },
+        );
+
+        let stats = pb::FileStats {
+            num_records: 42,
+            columns,
+        };
+
+        let json = map_file_stats(Some(stats)).expect("expected stats json");
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(value["numRecords"], 42);
+        assert_eq!(value["minValues"]["id"], 1);
+        assert_eq!(value["maxValues"]["id"], 100);
+        assert_eq!(value["minValues"]["name"], "a");
+        assert_eq!(value["maxValues"]["name"], "z");
+        assert_eq!(value["nullCount"]["name"], 3);
+        assert_eq!(value["nullCount"]["id"], 0);
     }
 
     #[test]
