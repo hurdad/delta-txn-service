@@ -1,5 +1,7 @@
 # Delta Txn Service
 
+[![Build](https://github.com/hurdad/delta-txn-service/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/hurdad/delta-txn-service/actions/workflows/docker-publish.yml)
+
 A **high-performance Delta Lake transaction coordinator** implemented in **Rust + gRPC**, designed to provide **atomic, typed, non-Spark commits** to Delta Lake tables.
 
 This service owns **Delta log commits only**.  
