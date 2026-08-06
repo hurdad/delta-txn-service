@@ -65,7 +65,7 @@ message ListActiveFilesRequest {
 // The stream always begins with exactly one `header` message, followed by
 // zero or more `batch` messages (each carrying a server-chosen-size chunk
 // of files, not necessarily one file per message -- see
-// DEFAULT_FILE_BATCH_SIZE in the server implementation) until the stream
+// FILE_BATCH_SIZE in the server implementation) until the stream
 // closes. A oneof (rather than "first message happens to have version set,
 // rest don't") makes that framing a compile-time-checked client contract
 // instead of an implicit, undocumented convention.
@@ -267,12 +267,10 @@ message TableMetadata {
   string name = 2;
   string description = 3;
 
-  // Serialized Arrow / Spark schema JSON (Delta-compatible) -- see
-  // kernel-lake's own schema_translation.hpp (or equivalent for any other
-  // client) for how a client is expected to parse this into its own
-  // native schema representation. Not validated for well-formedness by
-  // this service on the Commit write path beyond what delta-rs's own
-  // Metadata deserialization requires.
+  // Serialized Arrow / Spark schema JSON (Delta-compatible) -- each client
+  // is expected to parse this into its own native schema representation.
+  // Not validated for well-formedness by this service on the Commit write
+  // path beyond what delta-rs's own Metadata deserialization requires.
   string schema_string = 4;
 
   // Column names this table is partitioned by, in partition-spec order

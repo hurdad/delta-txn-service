@@ -16,7 +16,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 // telemetry/tracing.rs) already installs tracing_opentelemetry's layer and
 // a live OTLP TracerProvider, but with no span ever created around a
 // request, it had nothing to export; and with no incoming-context
-// extraction, a caller's own trace (e.g. a KernelLake query span) could
+// extraction, a caller's own trace (e.g. a client-side query span) could
 // never have linked up here even once a span existed. GrpcMetricsLayer
 // (telemetry/metrics.rs) is the shape this mirrors -- a tower Layer/Service
 // wrapping every RPC uniformly rather than hand-instrumenting each of

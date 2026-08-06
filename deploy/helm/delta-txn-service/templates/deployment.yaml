@@ -28,14 +28,14 @@ spec:
               containerPort: {{ .Values.service.port }}
               protocol: TCP
           readinessProbe:
-            tcpSocket:
-              port: grpc
+            grpc:
+              port: {{ .Values.service.port }}
             initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 5
           livenessProbe:
-            tcpSocket:
-              port: grpc
+            grpc:
+              port: {{ .Values.service.port }}
             initialDelaySeconds: 10
             periodSeconds: 20
             timeoutSeconds: 5

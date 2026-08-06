@@ -287,6 +287,12 @@ impl DeltaTxnService for DeltaTxnGrpcServer {
 
         self.check_table_uri_allowed(normalized_table_uri.as_str())?;
 
+        // Validated before the lock is taken or the table is opened: a
+        // malformed action list (e.g. an unspecified data_change) is a
+        // pure client-input error that doesn't need either a network round
+        // trip to storage or the per-table lock held while it's rejected.
+        let actions = map_actions(r.actions).map_err(|e| Status::invalid_argument(e))?;
+
         // Held across the whole open-table -> version-check -> commit
         // sequence below, not just the commit call itself -- see
         // TableLockManager's own doc comment for why the version check has
@@ -311,8 +317,6 @@ impl DeltaTxnService for DeltaTxnGrpcServer {
                 }));
             }
         }
-
-        let actions = map_actions(r.actions).map_err(|e| Status::invalid_argument(e))?;
 
         let version = commit_actions(table, actions)
             .await

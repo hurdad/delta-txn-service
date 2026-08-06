@@ -7,9 +7,8 @@
 // maintain the compile cost of) client stub code here. A downstream
 // *consumer* wanting a Rust client would need its own tonic-prost-build
 // step with `build_client(true)` against the same proto -- this repo
-// doesn't provide one; KernelLake's own C++ client
-// (github.com/<org>/kernel-lake's cmake/ThirdPartyDeltaTxnProto.cmake)
-// generates its C++ equivalent independently, from a vendored copy of
+// doesn't provide one; a non-Rust client (e.g. a C++ consumer) would
+// likewise generate its own stubs independently from a vendored copy of
 // this same proto file.
 use std::path::PathBuf;
 

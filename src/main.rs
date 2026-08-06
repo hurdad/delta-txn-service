@@ -38,6 +38,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let svc =
         DeltaTxnServiceServer::with_interceptor(svc, make_auth_interceptor(grpc_config.api_key));
 
+    // The standard grpc.health.v1.Health service (tonic-health), reported
+    // as SERVING for DeltaTxnService as soon as the process is ready to
+    // accept requests -- this service never transitions any table/backend
+    // state after startup that would warrant flipping it back to
+    // NOT_SERVING, so "SERVING for the rest of the process's life" is the
+    // whole story. Deliberately added outside make_auth_interceptor: an
+    // orchestrator's liveness/readiness probe has no practical way to
+    // supply DELTA_TXN_GRPC_API_KEY, so gating health checks behind it
+    // would make the probe itself the thing misconfigured auth breaks.
+    let (health_reporter, health_service) = tonic_health::server::health_reporter();
+    health_reporter
+        .set_serving::<DeltaTxnServiceServer<DeltaTxnGrpcServer>>()
+        .await;
+
     let meter = global::meter("delta-txn-service");
     let metrics_layer = GrpcMetricsLayer::new(meter);
 
@@ -59,7 +73,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         server = server.tls_config(ServerTlsConfig::new().identity(identity))?;
     }
 
-    server.add_service(svc).serve(grpc_config.addr).await?;
+    server
+        .add_service(svc)
+        .add_service(health_service)
+        .serve(grpc_config.addr)
+        .await?;
 
     Ok(())
 }

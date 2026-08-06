@@ -20,6 +20,12 @@ tonic = { version = "0.14.3", features = ["tls-ring"] }
 tonic-prost = "0.14.3"
 prost = "0.14.3"
 prost-types = "0.14.3"
+# The standard grpc.health.v1.Health service, unauthenticated (added
+# alongside DeltaTxnServiceServer in main.rs, not behind
+# make_auth_interceptor) -- lets Kubernetes/other orchestrators use a real
+# gRPC health probe instead of a bare TCP-connect check, without needing to
+# supply an API key from a liveness/readiness probe.
+tonic-health = "0.14.6"
 tower = "0.5.3"
 http-body = "1.0.1"
 # Safe Pin projection for MetricsBody (telemetry/metrics.rs) -- already

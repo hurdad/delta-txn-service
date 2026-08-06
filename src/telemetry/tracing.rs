@@ -17,7 +17,8 @@ const DEFAULT_SERVICE_NAME: &str = "delta-txn-service";
 /// enabled -- see otel_export_enabled()) so their Drop impls run at
 /// process shutdown, flushing any buffered spans/metrics before exit.
 /// Both are None when export is disabled (or failed to construct -- see
-/// build_tracer()'s own comment on that silent-failure gap); dropping a
+/// build_tracer()'s own comment, and log_exporter_build_error(), for how
+/// that failure is now reported); dropping a
 /// None TelemetryGuard is a no-op either way. Held as `let _guard = ...`
 /// in main() for the whole process lifetime, never inspected otherwise.
 pub struct TelemetryGuard {
@@ -92,26 +93,30 @@ pub fn init_tracing() -> TelemetryGuard {
     guard
 }
 
+/// Prints a bootstrap-time diagnostic straight to stderr rather than going
+/// through `tracing::warn!` -- both build_tracer() and build_meter_provider()
+/// run *before* `tracing_subscriber`'s global subscriber is installed (see
+/// init_tracing()), so a `tracing` call here would go nowhere. Used only for
+/// the one failure mode that would otherwise be completely silent: OTLP
+/// exporter construction failing (malformed OTEL_EXPORTER_OTLP_ENDPOINT,
+/// unreachable DNS name at construction time if the SDK validates that
+/// eagerly, etc.) even though `otel_export_enabled()` returned true --
+/// without this, an operator who believes export is configured gets no
+/// traces/metrics and no indication anything went wrong.
+fn log_exporter_build_error(signal: &str, protocol_label: &str, error: impl std::fmt::Display) {
+    eprintln!(
+        "delta-txn-service: failed to build OTLP {signal} exporter (protocol={protocol_label}): \
+         {error} -- {signal} export disabled for this process"
+    );
+}
+
 /// Builds the OTLP span exporter for `protocol` and wraps it in a real
 /// SdkTracerProvider, registering it as the process-global tracer provider
 /// (`global::set_tracer_provider`) and stashing it in `guard` so it gets
-/// shut down/flushed at process exit.
-///
-/// KNOWN GAP (found auditing this file, not yet fixed): `.build().ok()`
-/// silently discards the exporter-construction error and returns `None`
-/// on failure (a malformed OTEL_EXPORTER_OTLP_ENDPOINT, unreachable DNS
-/// name at construction time if the SDK validates that eagerly, etc.) --
-/// init_tracing() then just falls back to no OTel layer at all, with zero
-/// indication to the operator that anything went wrong; `otel_export_enabled()`
-/// having returned `true` (an endpoint env var *was* set) makes this a
-/// real "silently produced no traces despite being configured to" trap,
-/// not just a theoretical one. Not fixed here: this function runs *before*
-/// `tracing_subscriber`'s global subscriber is installed (see
-/// init_tracing()), so a `tracing::warn!` call here would itself go
-/// nowhere -- surfacing this properly needs either reordering
-/// initialization or falling back to a raw `eprintln!` for this one
-/// bootstrap-time diagnostic, a real (if small) design choice, not made
-/// unilaterally in this audit pass.
+/// shut down/flushed at process exit. A construction failure logs via
+/// log_exporter_build_error() (see its own doc comment) and this function
+/// returns `None`, same as before -- init_tracing() falls back to no OTel
+/// layer at all, but now with an operator-visible reason why.
 fn build_tracer(
     protocol: Protocol,
     resource: Resource,
@@ -122,16 +127,19 @@ fn build_tracer(
             .with_tonic()
             .with_protocol(Protocol::Grpc)
             .build()
+            .map_err(|e| log_exporter_build_error("trace", "grpc", e))
             .ok(),
         Protocol::HttpBinary => opentelemetry_otlp::SpanExporter::builder()
             .with_http()
             .with_protocol(Protocol::HttpBinary)
             .build()
+            .map_err(|e| log_exporter_build_error("trace", "http/protobuf", e))
             .ok(),
         Protocol::HttpJson => opentelemetry_otlp::SpanExporter::builder()
             .with_http()
             .with_protocol(Protocol::HttpJson)
             .build()
+            .map_err(|e| log_exporter_build_error("trace", "http/json", e))
             .ok(),
     };
 
@@ -147,28 +155,31 @@ fn build_tracer(
     })
 }
 
-/// Same shape (and the same silent-failure-on-bad-config gap, see
-/// build_tracer()'s doc comment) as build_tracer(), for metrics instead of
-/// traces -- registered as the process-global meter provider by
-/// init_tracing() itself (not here), since GrpcMetricsLayer's own
-/// `global::meter("delta-txn-service")` call (main.rs) needs that to have
-/// already happened.
+/// Same shape (and the same construction-failure logging, see
+/// build_tracer()'s doc comment and log_exporter_build_error()) as
+/// build_tracer(), for metrics instead of traces -- registered as the
+/// process-global meter provider by init_tracing() itself (not here), since
+/// GrpcMetricsLayer's own `global::meter("delta-txn-service")` call
+/// (main.rs) needs that to have already happened.
 fn build_meter_provider(protocol: Protocol, resource: Resource) -> Option<SdkMeterProvider> {
     let exporter = match protocol {
         Protocol::Grpc => opentelemetry_otlp::MetricExporter::builder()
             .with_tonic()
             .with_protocol(Protocol::Grpc)
             .build()
+            .map_err(|e| log_exporter_build_error("metric", "grpc", e))
             .ok(),
         Protocol::HttpBinary => opentelemetry_otlp::MetricExporter::builder()
             .with_http()
             .with_protocol(Protocol::HttpBinary)
             .build()
+            .map_err(|e| log_exporter_build_error("metric", "http/protobuf", e))
             .ok(),
         Protocol::HttpJson => opentelemetry_otlp::MetricExporter::builder()
             .with_http()
             .with_protocol(Protocol::HttpJson)
             .build()
+            .map_err(|e| log_exporter_build_error("metric", "http/json", e))
             .ok(),
     };
 

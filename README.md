@@ -48,7 +48,7 @@ This project provides:
 ❌ Replace Spark  
 ❌ Perform query execution
 
-Writers (Spark, Flow-Pipe, Arrow C++, etc.) are responsible for **data writes**.  
+Writers (Spark, Arrow C++, other native pipelines, etc.) are responsible for **data writes**.  
 This service is responsible for **metadata correctness**.
 
 ---
@@ -56,22 +56,27 @@ This service is responsible for **metadata correctness**.
 ## Architecture
 
 ```
-Writer (Spark / Arrow / etc)
-        |
-        |  gRPC (CommitRequest)
-        v
-+----------------------+
-|  Delta Txn Service   |
-|  (Rust / tonic)     |
-+----------------------+
-        |
-        |  atomic commit
-        v
-   _delta_log/*.json
+Writer (Spark / Arrow / etc)         Reader (query engine / client)
+        |                                     |
+        |  gRPC Commit                        |  gRPC GetTable / ListActiveFiles
+        v                                     v
+  +------------------------------------------------+
+  |               Delta Txn Service                |
+  |                (Rust / tonic)                  |
+  +------------------------------------------------+
+        |                                     ^
+        |  atomic commit                      |  version / schema /
+        v                                     |  active file list
+   _delta_log/*.json  ------------------------+
         |
         v
    Object Storage (S3 / MinIO / FS)
 ```
+
+The read path (`GetTable`, `ListActiveFiles`) never blocks on or serializes
+against the write path — it opens the table fresh and reads whatever
+`_delta_log/*.json` snapshot is currently visible, taking no lock. See
+"Concurrency model" below.
 
 ---
 
@@ -142,10 +147,10 @@ AWS_ALLOW_HTTP=true
 - `DELTA_TXN_GRPC_TLS_CERT`: Path to a PEM-encoded TLS certificate for gRPC.
 - `DELTA_TXN_GRPC_TLS_KEY`: Path to a PEM-encoded TLS private key for gRPC.
 - `DELTA_TXN_GRPC_API_KEY`: Optional API key for gRPC auth (clients send `x-api-key` or `authorization: Bearer ...`).
-- `DELTA_TXN_ALLOWED_TABLE_PREFIXES`: Optional comma-separated list of `table_uri` prefixes. When set, `Commit` and
-  `GetTable` reject any `table_uri` that doesn't start with one of these prefixes. When unset (the default), a client
-  may address any table URI the server's storage credentials can reach — set this in any deployment where the
-  API key/network boundary isn't trusted to scope table access on its own.
+- `DELTA_TXN_ALLOWED_TABLE_PREFIXES`: Optional comma-separated list of `table_uri` prefixes. When set, `Commit`,
+  `GetTable`, and `ListActiveFiles` all reject any `table_uri` that doesn't start with one of these prefixes. When
+  unset (the default), a client may address any table URI the server's storage credentials can reach — set this in
+  any deployment where the API key/network boundary isn't trusted to scope table access on its own.
 
 ### Storage (object-store)
 - `AWS_*`: All `AWS_` environment variables are forwarded to `delta-rs` object-store configuration
@@ -226,10 +231,10 @@ response body; the metrics middleware observes the response body itself to catch
 Independent of the metrics above: when OTLP export is enabled, every request gets a real
 `grpc.request` span (`rpc.system`/`rpc.service`/`rpc.method` attributes), parented to an
 incoming [W3C `traceparent`](https://www.w3.org/TR/trace-context/) header when the caller
-sends one — so a caller that also participates in W3C trace-context propagation (e.g.
-KernelLake's own `DeltaTxnClient`, see its `ClientSpan`) gets a genuinely correlated,
-cross-process trace rather than two disconnected trace trees. Every `tracing::info!`/
-`warn!`/`error!` call anywhere under a request's handling runs inside that request's span.
+sends one — so a caller that also participates in W3C trace-context propagation gets a
+genuinely correlated, cross-process trace rather than two disconnected trace trees. Every
+`tracing::info!`/`warn!`/`error!` call anywhere under a request's handling runs inside that
+request's span.
 
 ---
 
