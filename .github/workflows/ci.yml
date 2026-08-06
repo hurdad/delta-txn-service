@@ -1,0 +1,47 @@
+name: CI
+
+# Build + test validation for pull requests -- the counterpart to
+# docker-publish.yml (which builds, tests via the same Dockerfile, and
+# pushes to GHCR, but only on push to main/tags). Without this, a pull
+# request could be reviewed and merged without ever having been built or
+# tested by CI at all -- only *after* landing on main, when
+# docker-publish.yml runs and (if it fails) publishes nothing, but by then
+# the broken change is already on main.
+#
+# Deliberately does not also trigger on `push: branches: [main]`:
+# docker-publish.yml already builds (and, via the Dockerfile's own
+# `RUN cargo test --release` step, tests) every push to main -- adding the
+# same trigger here would just build everything a second time for no
+# additional signal. `target: builder` stops the build at the same stage
+# docker-publish.yml's own multi-stage build passes through on its way to
+# the runtime image, so this runs the identical `cargo build --release` +
+# `cargo test --release` steps, just without ever assembling or pushing
+# the final runtime image.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Shares the same GitHub Actions cache scope as docker-publish.yml's
+      # own build (cache-from/cache-to: type=gha is keyed by repo, not by
+      # workflow), so a PR build warms the cache the post-merge publish
+      # build then reuses, and vice versa.
+      - name: Build and test (builder stage -- runs cargo test --release)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: builder
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

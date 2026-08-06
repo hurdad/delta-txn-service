@@ -9,6 +9,9 @@ license = "Apache-2.0"
 # Async runtime
 # -----------------------------
 tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread"] }
+# ReceiverStream, adapting a tokio::sync::mpsc::Receiver into the
+# futures_core::Stream ListActiveFiles' server-streaming response needs.
+tokio-stream = "0.1.17"
 
 # -----------------------------
 # gRPC / Protobuf
@@ -19,6 +22,11 @@ prost = "0.14.3"
 prost-types = "0.14.3"
 tower = "0.5.3"
 http-body = "1.0.1"
+# Safe Pin projection for MetricsBody (telemetry/metrics.rs) -- already
+# resolved transitively (tonic/tower's own dependency graph pulls it in),
+# declared directly here since this crate's own code now uses its
+# `pin_project!` macro too.
+pin-project-lite = "0.2.17"
 
 # -----------------------------
 # Delta Lake (native)

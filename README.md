@@ -36,6 +36,7 @@ This project provides:
 ✅ Enforces optimistic concurrency (`expected_version`)  
 ✅ Applies ordered Delta actions (`AddFile`, `RemoveFile`, `Protocol`, `Metadata`)  
 ✅ Commits atomically using `delta-rs`  
+✅ Streams a table's currently-active file list (`ListActiveFiles`) for readers  
 ✅ Exposes a stable gRPC API
 
 ---
@@ -76,14 +77,26 @@ Writer (Spark / Arrow / etc)
 
 ## gRPC API (summary)
 
+### `GetTable`
+Fetch table version, protocol, and metadata. No file listing — see
+`ListActiveFiles` below for that. A plain read: takes no lock, reflects
+whatever snapshot is visible at the moment the server opens the table.
+
 ### `Commit`
 Atomically commit Delta actions.
 
 - Optimistic concurrency via `expected_version`
 - Fully typed protobuf actions (no JSON)
 
-### `GetTable`
-Fetch table version, protocol, and metadata.
+### `ListActiveFiles`
+Server-streaming: every currently-active (not yet removed) data file for a
+table's latest version — the read-side counterpart to `Commit`'s
+`AddFile`/`RemoveFile` actions. Streamed rather than a single response
+because a real table's active file set can exceed gRPC's default 4 MiB
+message limit; the stream always starts with one header message (table
+version/schema/protocol, the same info `GetTable` returns) followed by
+zero or more batches of files. Like `GetTable`, a plain read — no lock,
+no interaction with `Commit`'s optimistic-concurrency machinery.
 
 ---
 
@@ -199,6 +212,25 @@ gRPC server metrics via OpenTelemetry:
 All metrics include standard RPC attributes:
 `rpc.system`, `rpc.service`, `rpc.method`, and `rpc.grpc.status_code`.
 
+`grpc.server.errors` correctly counts every non-OK request, including application-level
+failures like "table not found" or a `ListActiveFiles` stream that fails partway through
+— not just requests rejected before a handler runs (e.g. a missing/invalid API key). gRPC's
+real status for those in-handler cases is carried in HTTP/2 trailers, sent only after the
+response body; the metrics middleware observes the response body itself to catch this case
+(see `telemetry/metrics.rs`'s own doc comment for the mechanics).
+
+---
+
+## Tracing
+
+Independent of the metrics above: when OTLP export is enabled, every request gets a real
+`grpc.request` span (`rpc.system`/`rpc.service`/`rpc.method` attributes), parented to an
+incoming [W3C `traceparent`](https://www.w3.org/TR/trace-context/) header when the caller
+sends one — so a caller that also participates in W3C trace-context propagation (e.g.
+KernelLake's own `DeltaTxnClient`, see its `ClientSpan`) gets a genuinely correlated,
+cross-process trace rather than two disconnected trace trees. Every `tracing::info!`/
+`warn!`/`error!` call anywhere under a request's handling runs inside that request's span.
+
 ---
 
 ## Repository layout
@@ -210,8 +242,8 @@ delta-txn-service/
 │   ├── grpc/              # tonic service + mappings
 │   ├── delta/             # Delta table + commit logic
 │   ├── locking/           # per-table commit locks
-│   ├── config/            # storage config
-│   └── telemetry/         # tracing
+│   ├── config/            # storage + gRPC server config
+│   └── telemetry/         # tracing setup, request tracing/metrics middleware
 ├── deploy/                # Helm / K8s / Compose
 └── Dockerfile
 ```
@@ -223,6 +255,14 @@ delta-txn-service/
 - Delta Lake optimistic concurrency is always enforced
 - Optional in-process per-table async locks reduce conflicts
 - Safe to run multiple replicas (stateless)
+
+The internal Delta operation type used for the server's own conflict-detection
+isolation-level choice is derived from the client's `CommitInfo.operation`
+(`WRITE`/`MERGE`/`UPDATE`/`DELETE`/`OPTIMIZE`/`VACUUM`/`RESTORE`), so non-data-changing
+operations like `OPTIMIZE`/`VACUUM` get the isolation-level downgrade delta-rs allows for
+them rather than always being treated as a data-changing `Write`. See `delta/commit.rs`'s
+own doc comment for residual imprecision (e.g. `Merge`'s per-clause predicates aren't
+represented on the wire today).
 
 ---
 

@@ -1,7 +1,17 @@
 use tonic::{Request, Status};
 
 /// Constant-time string comparison to avoid leaking the configured API key
-/// through response-timing side channels.
+/// one byte at a time through response-timing side channels (an attacker
+/// measuring how long rejection takes for a guessed key could otherwise
+/// learn how many leading bytes matched).
+///
+/// The early `a.len() != b.len()` return *is* a timing leak of the key's
+/// length specifically -- a deliberate, standard tradeoff shared by
+/// essentially every constant-time-compare implementation (including
+/// well-reviewed ones like the `subtle` crate's), not an oversight: byte
+/// *content* is what actually needs protecting (it's the secret), and an
+/// API key's length is rarely treated as sensitive on its own (often
+/// fixed/predictable anyway, e.g. a UUID).
 pub fn constant_time_eq(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
     if a.len() != b.len() {
@@ -13,6 +23,19 @@ pub fn constant_time_eq(a: &str, b: &str) -> bool {
         == 0
 }
 
+/// Builds a tonic request interceptor checking `api_key` against every
+/// request's metadata -- either the `x-api-key` header directly, or a
+/// `Bearer <token>` `authorization` header (checked in that order; the
+/// first match wins, but both are always attempted if the first is
+/// absent/wrong, not short-circuited on presence alone). `api_key: None`
+/// makes this a pure pass-through -- every request accepted regardless of
+/// credentials -- matching the "empty/whitespace-only DELTA_TXN_GRPC_API_KEY
+/// treated as unset" behavior in config::grpc::load_grpc_config().
+///
+/// Runs as a tonic per-service interceptor (see main.rs's own comment on
+/// how this composes with the tower-Layer-based
+/// TraceContextLayer/GrpcMetricsLayer, which both still see -- and
+/// record -- a request this rejects).
 pub fn make_auth_interceptor(
     api_key: Option<String>,
 ) -> impl Fn(Request<()>) -> Result<Request<()>, Status> + Clone {
