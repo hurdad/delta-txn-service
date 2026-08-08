@@ -1,10 +1,30 @@
 use super::errors::DeltaTxnError;
 use deltalake::kernel::transaction::{CommitBuilder, TableReference};
-use deltalake::kernel::{Action, CommitInfo};
+use deltalake::kernel::{Action, CommitInfo, Metadata, Protocol};
 use deltalake::protocol::{DeltaOperation, SaveMode};
 use deltalake::DeltaTableBuilder;
 use std::collections::HashMap;
 use url::Url;
+
+/// The single place that scans an action list for its `Protocol` action --
+/// shared by grpc::server::commit() (deciding whether a create-table
+/// request is well-formed) and `create_table` below (building
+/// `DeltaOperation::Create`), so there's exactly one definition of "does
+/// this action list have a Protocol" for both to agree on.
+pub fn find_protocol(actions: &[Action]) -> Option<&Protocol> {
+    actions.iter().find_map(|a| match a {
+        Action::Protocol(p) => Some(p),
+        _ => None,
+    })
+}
+
+/// See `find_protocol`'s doc comment -- same reasoning, for `Metadata`.
+pub fn find_metadata(actions: &[Action]) -> Option<&Metadata> {
+    actions.iter().find_map(|a| match a {
+        Action::Metadata(m) => Some(m),
+        _ => None,
+    })
+}
 
 fn default_write_operation() -> DeltaOperation {
     DeltaOperation::Write {
@@ -162,44 +182,39 @@ pub async fn commit_actions(
 ///   conflict-isolation purposes to get right either way.
 ///
 /// Requires `actions` to contain exactly one `Protocol` and one
-/// `Metadata` action; the caller validates this up front (so it can
+/// `Metadata` action; the caller (grpc::server::commit()) validates this
+/// up front via `find_protocol`/`find_metadata` -- the same two functions
+/// this signature requires it to have already extracted -- so it can
 /// return a client-friendly `Status::failed_precondition` naming exactly
-/// what's missing) -- the `ok_or_else` checks here are a defensive
-/// fallback against that contract being violated, not the primary
-/// validation, so a client that somehow trips them anyway gets a generic
-/// (but still not misleadingly-labeled) `Internal`, not a panic.
+/// what's missing, and this function never has to re-scan `actions` (or
+/// fail on their absence) itself.
 ///
 /// Same cross-replica caveat as everywhere else optimistic concurrency is
 /// involved in this service: two different replicas racing to create the
 /// *same* new table_uri at the same time aren't serialized by anything in
 /// this process (TableLockManager is per-process only, see its own doc
 /// comment) -- delta-rs's own atomic conditional-put still prevents actual
-/// corruption, one commit simply loses the race.
+/// corruption. But with no baseline `DeltaTableState` to conflict-check
+/// against (`table_data: None` below), the loser doesn't necessarily just
+/// get an error back: `CommitBuilder` can retry its write against the
+/// snapshot the winner just landed, succeeding at a *later* version with
+/// the loser's own Protocol/Metadata actions silently duplicated into the
+/// table's history instead. A genuine first commit to a brand-new table
+/// is always version 0, so the check below turns "landed at some other
+/// version" into an explicit conflict error instead of a silent, corrupt-
+/// looking success.
 pub async fn create_table(
     table_url: Url,
     storage_options: HashMap<String, String>,
     actions: Vec<Action>,
+    protocol: Protocol,
+    metadata: Metadata,
 ) -> Result<i64, DeltaTxnError> {
     let table = DeltaTableBuilder::from_url(table_url.clone())
         .map_err(|e| DeltaTxnError::OpenFailed(e.to_string()))?
         .with_storage_options(storage_options)
         .build()
         .map_err(|e| DeltaTxnError::OpenFailed(e.to_string()))?;
-
-    let protocol = actions
-        .iter()
-        .find_map(|a| match a {
-            Action::Protocol(p) => Some(p.clone()),
-            _ => None,
-        })
-        .ok_or_else(|| DeltaTxnError::CommitFailed("missing Protocol action".to_string()))?;
-    let metadata = actions
-        .iter()
-        .find_map(|a| match a {
-            Action::Metadata(m) => Some(m.clone()),
-            _ => None,
-        })
-        .ok_or_else(|| DeltaTxnError::CommitFailed("missing Metadata action".to_string()))?;
 
     let operation = DeltaOperation::Create {
         mode: SaveMode::ErrorIfExists,
@@ -214,7 +229,15 @@ pub async fn create_table(
         .await
         .map_err(|e| DeltaTxnError::CommitFailed(e.to_string()))?;
 
-    Ok(result.version() as i64)
+    let version = result.version() as i64;
+    if version != 0 {
+        return Err(DeltaTxnError::VersionConflict {
+            expected: 0,
+            actual: version,
+        });
+    }
+
+    Ok(version)
 }
 
 #[cfg(test)]

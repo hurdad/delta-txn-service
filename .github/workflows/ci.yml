@@ -24,6 +24,27 @@ permissions:
   contents: read
 
 jobs:
+  # Formatting check via rustfmt (see rustfmt.toml at the repo root for the
+  # one setting pinned -- `edition`, matching Cargo.toml's own -- otherwise
+  # stock rustfmt defaults). Kept as its own fast job rather than a step in
+  # build-and-test: it needs a real Rust toolchain (the Docker-based build
+  # job never installs one directly, cargo runs inside the build image),
+  # and failing fast on formatting before the much slower Docker build/test
+  # job runs saves CI time on a PR that just needs `cargo fmt` re-run.
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
   build-and-test:
     runs-on: ubuntu-latest
     steps:

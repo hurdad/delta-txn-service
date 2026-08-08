@@ -9,19 +9,19 @@ use std::collections::HashMap;
 use std::pin::Pin;
 
 use deltalake::kernel::scalars::ScalarExt;
-use deltalake::kernel::Action;
 use deltalake::table::state::DeltaTableState;
 use deltalake::{ensure_table_uri, DeltaTableError};
 use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
 use tonic::{Request, Response, Status};
 use tracing::warn;
+use url::Url;
 
 use crate::config::storage::{
     is_table_uri_allowed, load_allowed_table_prefixes, load_storage_options,
 };
 use crate::delta::errors::DeltaTxnError;
 use crate::delta::{
-    commit::{commit_actions, create_table},
+    commit::{commit_actions, create_table, find_metadata, find_protocol},
     table::{open_table, table_exists},
 };
 use crate::grpc::mapping::{map_actions, map_active_file_to_pb};
@@ -121,6 +121,43 @@ impl DeltaTxnGrpcServer {
             )))
         }
     }
+
+    /// Allowlist-checks and normalizes a client-supplied table_uri --
+    /// shared by all three handlers, which otherwise each needed the exact
+    /// same three-step sequence.
+    ///
+    /// The raw, client-supplied string is checked first, but only when it
+    /// already carries an explicit scheme (`"://"`): `ensure_table_uri()`
+    /// below creates a local directory as a side effect for a bare/
+    /// relative local path (delta-rs's own documented behavior for
+    /// `ensure_table_uri`), unconditionally, even for a table_uri that's
+    /// about to be rejected by the allowlist -- checking a scheme'd URI
+    /// raw here means a disallowed absolute URI never reaches
+    /// `ensure_table_uri()` at all, so no directory gets created for a
+    /// request that was never going to be allowed to use it. A *relative*
+    /// path can't be evaluated correctly before normalization, though:
+    /// `ensure_table_uri()` rewrites it into an absolute `file://` URI,
+    /// which is the only form `is_table_uri_allowed` can match against a
+    /// configured `file://` prefix -- checking the bare relative string
+    /// here would reject some allowlisted relative paths outright before
+    /// they ever got the chance to normalize into an allowed form. So this
+    /// raw check is skipped for anything without a scheme, and the
+    /// post-normalization check right after remains the actual source of
+    /// truth either way, since normalization can change which configured
+    /// prefix a URI matches (trailing slashes, relative paths) in ways
+    /// this raw check can't account for.
+    fn normalize_and_check_table_uri(&self, table_uri: &str) -> Result<Url, Status> {
+        if table_uri.contains("://") {
+            self.check_table_uri_allowed(table_uri)?;
+        }
+
+        let normalized_table_uri =
+            ensure_table_uri(table_uri).map_err(|e| Status::invalid_argument(e.to_string()))?;
+
+        self.check_table_uri_allowed(normalized_table_uri.as_str())?;
+
+        Ok(normalized_table_uri)
+    }
 }
 
 // Shared by get_table() and list_active_files()'s header: converts a
@@ -185,7 +222,7 @@ fn map_open_or_snapshot_error(e: DeltaTableError) -> Status {
 // before the stream ends, since by the time this runs the RPC has already
 // returned `Ok(Response::new(stream))` to the client.
 async fn stream_active_files(
-    table_uri: String,
+    table_uri: Url,
     storage_opts: HashMap<String, String>,
     tx: tokio::sync::mpsc::Sender<Result<ListActiveFilesResponse, Status>>,
 ) {
@@ -196,11 +233,11 @@ async fn stream_active_files(
 }
 
 async fn stream_active_files_inner(
-    table_uri: String,
+    table_uri: Url,
     storage_opts: HashMap<String, String>,
     tx: &tokio::sync::mpsc::Sender<Result<ListActiveFilesResponse, Status>>,
 ) -> Result<(), Status> {
-    if !table_exists(table_uri.as_str(), storage_opts.clone())
+    if !table_exists(&table_uri, storage_opts.clone())
         .await
         .map_err(Status::from)?
     {
@@ -209,7 +246,7 @@ async fn stream_active_files_inner(
         )));
     }
 
-    let table = open_table(table_uri.as_str(), storage_opts)
+    let table = open_table(&table_uri, storage_opts)
         .await
         .map_err(Status::from)?;
 
@@ -321,27 +358,7 @@ impl DeltaTxnService for DeltaTxnGrpcServer {
         let r = req.into_inner();
         let table_uri = r.table_uri;
 
-        // Checked against the raw, client-supplied string *before*
-        // ensure_table_uri() below: for a `file://`/bare-local-path
-        // table_uri, ensure_table_uri() creates the local directory as a
-        // side effect (delta-rs's own documented behavior for
-        // ensure_table_uri -- see its own doc comment), unconditionally,
-        // even for a table_uri that's about to be rejected by the
-        // allowlist. This first check means a table_uri outside the
-        // allowlist never reaches that call at all, so no directory gets
-        // created for a request that was never going to be allowed to use
-        // it. It's a fast-path rejection, not the authorization decision
-        // itself -- the check against the *normalized* URI right after
-        // ensure_table_uri() (unchanged, still required) remains the
-        // actual source of truth, since normalization can occasionally
-        // change which configured prefix a URI matches (trailing slashes,
-        // relative paths) in ways this raw check can't account for.
-        self.check_table_uri_allowed(&table_uri)?;
-
-        let normalized_table_uri =
-            ensure_table_uri(&table_uri).map_err(|e| Status::invalid_argument(e.to_string()))?;
-
-        self.check_table_uri_allowed(normalized_table_uri.as_str())?;
+        let normalized_table_uri = self.normalize_and_check_table_uri(&table_uri)?;
 
         // Validated before the lock is taken or the table is opened: a
         // malformed action list (e.g. an unspecified data_change) is a
@@ -369,7 +386,7 @@ impl DeltaTxnService for DeltaTxnGrpcServer {
         // it's this RPC's other job: create the table from `actions`'
         // own Protocol/Metadata, exactly like the very first commit any
         // Delta writer makes to a location nothing has written to yet.
-        if !table_exists(normalized_table_uri.as_str(), self.storage_opts.clone())
+        if !table_exists(&normalized_table_uri, self.storage_opts.clone())
             .await
             .map_err(Status::from)?
         {
@@ -379,27 +396,40 @@ impl DeltaTxnService for DeltaTxnGrpcServer {
                      expected_version on the Commit that creates a new table",
                 ));
             }
-            let has_protocol = actions.iter().any(|a| matches!(a, Action::Protocol(_)));
-            let has_metadata = actions.iter().any(|a| matches!(a, Action::Metadata(_)));
-            if !(has_protocol && has_metadata) {
+            // The single shared scan (find_protocol/find_metadata, also
+            // used by create_table below) rather than a separate
+            // has_protocol/has_metadata pass here plus create_table
+            // re-deriving the same values itself -- one definition of
+            // "does this action list have a Protocol/Metadata" for both
+            // to agree on, and the values extracted here are handed
+            // straight to create_table instead of it re-scanning.
+            let protocol = find_protocol(&actions).cloned();
+            let metadata = find_metadata(&actions).cloned();
+            let (Some(protocol), Some(metadata)) = (protocol, metadata) else {
                 return Err(Status::failed_precondition(
                     "table_uri does not exist yet -- the Commit that creates a new table must \
                      include both a Protocol and a TableMetadata action",
                 ));
-            }
+            };
 
-            let version = create_table(normalized_table_uri, self.storage_opts.clone(), actions)
-                .await
-                .map_err(|e| Status::from(e))?;
+            let version = create_table(
+                normalized_table_uri,
+                self.storage_opts.clone(),
+                actions,
+                protocol,
+                metadata,
+            )
+            .await
+            .map_err(Status::from)?;
 
             return Ok(Response::new(CommitResponse {
                 committed_version: version,
             }));
         }
 
-        let table = open_table(normalized_table_uri.as_str(), self.storage_opts.clone())
+        let table = open_table(&normalized_table_uri, self.storage_opts.clone())
             .await
-            .map_err(|e| Status::from(e))?;
+            .map_err(Status::from)?;
 
         if let Some(expected) = r.expected_version {
             // delta-rs's DeltaTable::version() returns u64; expected/actual
@@ -439,18 +469,9 @@ impl DeltaTxnService for DeltaTxnGrpcServer {
         let r = req.into_inner();
         let table_uri = r.table_uri;
 
-        // See commit()'s own comment on this same check: prevents
-        // ensure_table_uri() below from creating a local directory as a
-        // side effect for a table_uri the allowlist was always going to
-        // reject.
-        self.check_table_uri_allowed(&table_uri)?;
+        let normalized_table_uri = self.normalize_and_check_table_uri(&table_uri)?;
 
-        let normalized_table_uri =
-            ensure_table_uri(&table_uri).map_err(|e| Status::invalid_argument(e.to_string()))?;
-
-        self.check_table_uri_allowed(normalized_table_uri.as_str())?;
-
-        if !table_exists(normalized_table_uri.as_str(), self.storage_opts.clone())
+        if !table_exists(&normalized_table_uri, self.storage_opts.clone())
             .await
             .map_err(Status::from)?
         {
@@ -459,9 +480,9 @@ impl DeltaTxnService for DeltaTxnGrpcServer {
             )));
         }
 
-        let table = open_table(normalized_table_uri.as_str(), self.storage_opts.clone())
+        let table = open_table(&normalized_table_uri, self.storage_opts.clone())
             .await
-            .map_err(|e| Status::from(e))?;
+            .map_err(Status::from)?;
 
         let snapshot = table.snapshot().map_err(map_open_or_snapshot_error)?;
         let (metadata, protocol) = build_metadata_and_protocol(snapshot)?;
@@ -495,25 +516,12 @@ impl DeltaTxnService for DeltaTxnGrpcServer {
         let r = req.into_inner();
         let table_uri = r.table_uri;
 
-        // See commit()'s own comment on this same check: prevents
-        // ensure_table_uri() below from creating a local directory as a
-        // side effect for a table_uri the allowlist was always going to
-        // reject.
-        self.check_table_uri_allowed(&table_uri)?;
-
-        let normalized_table_uri =
-            ensure_table_uri(&table_uri).map_err(|e| Status::invalid_argument(e.to_string()))?;
-
-        self.check_table_uri_allowed(normalized_table_uri.as_str())?;
+        let normalized_table_uri = self.normalize_and_check_table_uri(&table_uri)?;
 
         let storage_opts = self.storage_opts.clone();
         let (tx, rx) = tokio::sync::mpsc::channel(STREAM_CHANNEL_CAPACITY);
 
-        tokio::spawn(stream_active_files(
-            normalized_table_uri.to_string(),
-            storage_opts,
-            tx,
-        ));
+        tokio::spawn(stream_active_files(normalized_table_uri, storage_opts, tx));
 
         let stream: Self::ListActiveFilesStream = Box::pin(ReceiverStream::new(rx));
         Ok(Response::new(stream))

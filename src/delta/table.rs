@@ -1,7 +1,8 @@
 use super::errors::DeltaTxnError;
 use deltalake::logstore::LogStore;
-use deltalake::{ensure_table_uri, DeltaTable, DeltaTableBuilder};
+use deltalake::{DeltaTable, DeltaTableBuilder};
 use std::collections::HashMap;
+use url::Url;
 
 /// Opens (loads) an already-existing table. Fails outright --
 /// `DeltaTableError::NotATable`, wrapped as `DeltaTxnError::OpenFailed` --
@@ -9,13 +10,18 @@ use std::collections::HashMap;
 /// tell "doesn't exist yet" apart from a genuine open failure (every
 /// grpc::server handler) call `table_exists` first and only reach this
 /// function once that's confirmed `true`.
+///
+/// Takes an already-`ensure_table_uri`-normalized `Url` rather than a raw
+/// `&str`/re-normalizing internally: every caller in grpc::server has
+/// already normalized (and allowlist-checked) the client-supplied
+/// table_uri once by the time either this or `table_exists` is called, so
+/// normalizing again here would just be a second, redundant pass over the
+/// same string.
 pub async fn open_table(
-    table_uri: &str,
+    table_url: &Url,
     storage_options: HashMap<String, String>,
 ) -> Result<DeltaTable, DeltaTxnError> {
-    let table_url =
-        ensure_table_uri(table_uri).map_err(|e| DeltaTxnError::OpenFailed(e.to_string()))?;
-    deltalake::open_table_with_storage_options(table_url, storage_options)
+    deltalake::open_table_with_storage_options(table_url.clone(), storage_options)
         .await
         .map_err(|e| DeltaTxnError::OpenFailed(e.to_string()))
 }
@@ -39,13 +45,14 @@ pub async fn open_table(
 /// store handle bound to `table_uri` -- so calling
 /// `LogStore::is_delta_table_location()` on it here is the cheap check,
 /// not a disguised full open.
+///
+/// Takes an already-normalized `Url` -- see `open_table`'s matching doc
+/// comment for why.
 pub async fn table_exists(
-    table_uri: &str,
+    table_url: &Url,
     storage_options: HashMap<String, String>,
 ) -> Result<bool, DeltaTxnError> {
-    let table_url =
-        ensure_table_uri(table_uri).map_err(|e| DeltaTxnError::OpenFailed(e.to_string()))?;
-    let table = DeltaTableBuilder::from_url(table_url)
+    let table = DeltaTableBuilder::from_url(table_url.clone())
         .map_err(|e| DeltaTxnError::OpenFailed(e.to_string()))?
         .with_storage_options(storage_options)
         .build()
