@@ -8,6 +8,17 @@ on:
       - 'v*'
   workflow_dispatch:
 
+# Without this, every push to main queues its own full multi-arch build
+# (each historically ~4 hours -- QEMU-emulated arm64 plus the Dockerfile's
+# own `cargo test --release` gate) rather than superseding the previous
+# one. Several stacked at once contend for the same `cache-to: type=gha`
+# cache and GHCR push, which is exactly what caused four runs to all miss
+# GitHub Actions' 6-hour job timeout and get auto-cancelled instead of
+# any of them finishing. Only the latest commit's image matters anyway.
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   packages: write
