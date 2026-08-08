@@ -1,4 +1,17 @@
-replicaCount: 1
+# 2, not 1: the service is stateless (safe to run multiple replicas --
+# see the root README's "Concurrency model") and a single replica means
+# every deploy/node-drain/crash is a full outage with no traffic to fail
+# over to. Bump further for real production load; 2 is the minimum for
+# "a rolling deploy doesn't mean zero replicas serving."
+replicaCount: 2
+
+# Keeps at least one pod available during voluntary disruptions (a
+# `kubectl drain`, cluster autoscaler node removal, etc.) -- irrelevant at
+# replicaCount: 1 (nothing to keep available), so this only starts doing
+# anything once you've scaled past that.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
 
 image:
   repository: delta-txn-service
@@ -52,13 +65,23 @@ containerSecurityContext:
     drop:
       - ALL
 
+# Conservative starting points, not load-tested numbers -- this service's
+# dependency stack (Arrow/DataFusion/Parquet, pulled in transitively by
+# deltalake's own schema-parsing and ListActiveFiles' snapshot/file-listing
+# path) has a materially heavier memory footprint per request than a plain
+# CRUD service, and a big ListActiveFiles response (many thousands of
+# files, each carrying decoded per-column stats -- see FILE_BATCH_SIZE in
+# grpc/server.rs) or several concurrent Commits can spike well past what a
+# minimal-looking limit implies. Profile against your own table sizes and
+# commit/list traffic before trusting these at real scale; treat a change
+# here as "adjust based on measurement," not "these are already right."
 resources:
   requests:
-    cpu: 100m
-    memory: 128Mi
-  limits:
-    cpu: 500m
+    cpu: 250m
     memory: 256Mi
+  limits:
+    cpu: 1000m
+    memory: 512Mi
 
 nodeSelector: {}
 

@@ -2,6 +2,9 @@ use super::errors::DeltaTxnError;
 use deltalake::kernel::transaction::{CommitBuilder, TableReference};
 use deltalake::kernel::{Action, CommitInfo};
 use deltalake::protocol::{DeltaOperation, SaveMode};
+use deltalake::DeltaTableBuilder;
+use std::collections::HashMap;
+use url::Url;
 
 fn default_write_operation() -> DeltaOperation {
     DeltaOperation::Write {
@@ -26,6 +29,12 @@ fn string_param(params: &Option<std::collections::HashMap<String, serde_json::Va
 
 fn int_param(params: &Option<std::collections::HashMap<String, serde_json::Value>>, key: &str) -> Option<i64> {
     params.as_ref()?.get(key)?.as_i64()
+}
+
+// `DeltaOperation::Restore`'s `version` field is u64 (delta-rs versions are
+// always non-negative); every other int_param() call site below stays i64.
+fn uint_param(params: &Option<std::collections::HashMap<String, serde_json::Value>>, key: &str) -> Option<u64> {
+    params.as_ref()?.get(key)?.as_u64()
 }
 
 /// Maps a commit's own CommitInfo action (its `operation` string --
@@ -93,7 +102,7 @@ fn build_operation(actions: &[Action]) -> DeltaOperation {
             default_retention_millis: int_param(params, "default_retention_millis").unwrap_or(0),
         },
         Some("RESTORE") => DeltaOperation::Restore {
-            version: int_param(params, "version"),
+            version: uint_param(params, "version"),
             datetime: int_param(params, "datetime"),
         },
         // "WRITE", CONVERT (no DeltaOperation equivalent), an unrecognized
@@ -127,6 +136,81 @@ pub async fn commit_actions(
             table.log_store(),
             operation,
         )
+        .await
+        .map_err(|e| DeltaTxnError::CommitFailed(e.to_string()))?;
+
+    Ok(result.version() as i64)
+}
+
+/// Bootstraps a brand-new Delta table at `table_url` by committing
+/// `actions` as its version-0 commit -- the create-path counterpart to
+/// `commit_actions` above, used by grpc::server::commit() when
+/// `delta::table::table_exists` has already confirmed there's no
+/// `_delta_log` at this location yet (see that function's own doc
+/// comment for why that check has to happen first).
+///
+/// Two real differences from `commit_actions`, not just a different entry
+/// point for the same thing:
+/// - There is no existing `DeltaTableState` to hand `CommitBuilder` as a
+///   conflict-check baseline (`table_data: None`) -- there is nothing yet
+///   to conflict with.
+/// - The operation is always `DeltaOperation::Create`, built from
+///   `actions`' own `Protocol`/`Metadata` actions (mirroring what
+///   delta-rs's own `operations::create::CreateBuilder` does internally),
+///   not whatever `build_operation()` would infer from the client's
+///   `CommitInfo` -- a fresh table has no prior operation history for
+///   conflict-isolation purposes to get right either way.
+///
+/// Requires `actions` to contain exactly one `Protocol` and one
+/// `Metadata` action; the caller validates this up front (so it can
+/// return a client-friendly `Status::failed_precondition` naming exactly
+/// what's missing) -- the `ok_or_else` checks here are a defensive
+/// fallback against that contract being violated, not the primary
+/// validation, so a client that somehow trips them anyway gets a generic
+/// (but still not misleadingly-labeled) `Internal`, not a panic.
+///
+/// Same cross-replica caveat as everywhere else optimistic concurrency is
+/// involved in this service: two different replicas racing to create the
+/// *same* new table_uri at the same time aren't serialized by anything in
+/// this process (TableLockManager is per-process only, see its own doc
+/// comment) -- delta-rs's own atomic conditional-put still prevents actual
+/// corruption, one commit simply loses the race.
+pub async fn create_table(
+    table_url: Url,
+    storage_options: HashMap<String, String>,
+    actions: Vec<Action>,
+) -> Result<i64, DeltaTxnError> {
+    let table = DeltaTableBuilder::from_url(table_url.clone())
+        .map_err(|e| DeltaTxnError::OpenFailed(e.to_string()))?
+        .with_storage_options(storage_options)
+        .build()
+        .map_err(|e| DeltaTxnError::OpenFailed(e.to_string()))?;
+
+    let protocol = actions
+        .iter()
+        .find_map(|a| match a {
+            Action::Protocol(p) => Some(p.clone()),
+            _ => None,
+        })
+        .ok_or_else(|| DeltaTxnError::CommitFailed("missing Protocol action".to_string()))?;
+    let metadata = actions
+        .iter()
+        .find_map(|a| match a {
+            Action::Metadata(m) => Some(m.clone()),
+            _ => None,
+        })
+        .ok_or_else(|| DeltaTxnError::CommitFailed("missing Metadata action".to_string()))?;
+
+    let operation = DeltaOperation::Create {
+        mode: SaveMode::ErrorIfExists,
+        location: table_url,
+        protocol,
+        metadata,
+    };
+
+    let result = CommitBuilder::default()
+        .with_actions(actions)
+        .build(None, table.log_store(), operation)
         .await
         .map_err(|e| DeltaTxnError::CommitFailed(e.to_string()))?;
 

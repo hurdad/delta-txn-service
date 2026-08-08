@@ -1,8 +1,12 @@
 // Process entry point: loads config, wires up telemetry + the auth
-// interceptor + the DeltaTxnService implementation, and serves until the
-// process is killed (no graceful-shutdown signal handling -- a SIGTERM/
-// SIGINT just ends the process; any in-flight RPC is dropped, not drained).
+// interceptor + the DeltaTxnService implementation, and serves until a
+// shutdown signal arrives (see shutdown_signal() below) or an
+// unrecoverable startup error occurs.
+use std::time::Duration;
+
 use opentelemetry::global;
+use tokio::net::TcpStream;
+use tokio::signal;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tracing::info;
 
@@ -13,6 +17,126 @@ use delta_txn_service::grpc::server::DeltaTxnGrpcServer;
 use delta_txn_service::telemetry::metrics::GrpcMetricsLayer;
 use delta_txn_service::telemetry::trace_context::TraceContextLayer;
 use delta_txn_service::telemetry::tracing::init_tracing;
+
+/// Resolves on SIGTERM (what Kubernetes/Docker send on pod/container
+/// termination -- every rolling deploy, not just an operator-initiated
+/// stop) or Ctrl+C/SIGINT (local `cargo run`/`docker run -it`), whichever
+/// arrives first. Handed to tonic's own `serve_with_shutdown` (see below):
+/// once this future resolves, tonic stops accepting *new* connections but
+/// lets already-in-flight RPCs finish, instead of the previous behavior --
+/// the process simply ending, mid-request, with every open connection reset
+/// out from under whatever client was waiting on it. Delta's own atomic
+/// commit protocol already protects table data from a request being killed
+/// mid-write; what this actually buys is well-behaved clients getting a
+/// real response (success or a clean error) on every request made before
+/// shutdown began, instead of a connection reset on whichever ones lost
+/// the race with the signal.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        signal::ctrl_c()
+            .await
+            .expect("failed to install a Ctrl+C (SIGINT) handler");
+    };
+
+    // SIGTERM has no cross-platform equivalent in tokio::signal -- only
+    // Unix has the concept at all. Docker/Kubernetes only ever run this
+    // service on Linux, but `cargo build`/`cargo test` still need to
+    // compile on any platform a contributor develops on.
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("failed to install a SIGTERM handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
+
+    info!("shutdown signal received: draining in-flight requests before exiting");
+}
+
+/// If `AWS_ENDPOINT_URL` is set -- the self-hosted/MinIO-style deployment
+/// shape, where every `table_uri` this service ever opens ultimately
+/// routes through one fixed object-store endpoint -- spawns a background
+/// task that periodically probes that endpoint's TCP reachability and
+/// reflects it in the health service's status for
+/// `delta.txn.v1.DeltaTxnService` specifically (`SERVING` when reachable,
+/// `NOT_SERVING` when not). The Helm chart's readiness probe checks that
+/// exact service name (see deploy/helm's own `deployment.yaml`), so a
+/// storage outage now actually shows up as "not ready" instead of the
+/// health check meaning nothing beyond "the process started."
+///
+/// Deliberately only ever updates `DeltaTxnService`'s own status, never the
+/// overall-server (`""`) status the *liveness* probe checks: a downstream
+/// storage outage isn't a reason to *restart* this process -- restarting
+/// doesn't fix MinIO being down, and cycling pods repeatedly during an
+/// outage is its own antipattern -- it's a reason to stop routing *new*
+/// traffic here until it recovers, which is exactly what failing
+/// *readiness* (pulling the pod out of Service endpoints, no restart) does.
+///
+/// Deliberately does nothing at all when `AWS_ENDPOINT_URL` is unset (real
+/// AWS S3): there's no single fixed endpoint to probe here -- this service
+/// accepts an arbitrary `table_uri` per request, and S3 itself is
+/// IAM/region-routed rather than reached through one host -- so
+/// `DeltaTxnService`'s status just stays `SERVING` from startup onward,
+/// same as before this existed.
+fn spawn_storage_health_probe(
+    health_reporter: tonic_health::server::HealthReporter,
+    endpoint: String,
+) {
+    let Ok(parsed) = url::Url::parse(&endpoint) else {
+        tracing::warn!(
+            endpoint = %endpoint,
+            "AWS_ENDPOINT_URL is not a valid URL -- readiness will not reflect storage \
+             reachability"
+        );
+        return;
+    };
+    let Some(host) = parsed.host_str().map(str::to_string) else {
+        tracing::warn!(
+            endpoint = %endpoint,
+            "AWS_ENDPOINT_URL has no host -- readiness will not reflect storage reachability"
+        );
+        return;
+    };
+    let Some(port) = parsed.port_or_known_default() else {
+        tracing::warn!(
+            endpoint = %endpoint,
+            "AWS_ENDPOINT_URL has no resolvable port -- readiness will not reflect storage \
+             reachability"
+        );
+        return;
+    };
+
+    const PROBE_INTERVAL: Duration = Duration::from_secs(15);
+    const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
+    tokio::spawn(async move {
+        loop {
+            let reachable = tokio::time::timeout(PROBE_TIMEOUT, TcpStream::connect((host.as_str(), port)))
+                .await
+                .map(|connect_result| connect_result.is_ok())
+                .unwrap_or(false);
+
+            if reachable {
+                health_reporter
+                    .set_serving::<DeltaTxnServiceServer<DeltaTxnGrpcServer>>()
+                    .await;
+            } else {
+                health_reporter
+                    .set_not_serving::<DeltaTxnServiceServer<DeltaTxnGrpcServer>>()
+                    .await;
+            }
+
+            tokio::time::sleep(PROBE_INTERVAL).await;
+        }
+    });
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -40,10 +164,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // The standard grpc.health.v1.Health service (tonic-health), reported
     // as SERVING for DeltaTxnService as soon as the process is ready to
-    // accept requests -- this service never transitions any table/backend
-    // state after startup that would warrant flipping it back to
-    // NOT_SERVING, so "SERVING for the rest of the process's life" is the
-    // whole story. Deliberately added outside make_auth_interceptor: an
+    // accept requests. Deliberately added outside make_auth_interceptor: an
     // orchestrator's liveness/readiness probe has no practical way to
     // supply DELTA_TXN_GRPC_API_KEY, so gating health checks behind it
     // would make the probe itself the thing misconfigured auth breaks.
@@ -51,6 +172,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     health_reporter
         .set_serving::<DeltaTxnServiceServer<DeltaTxnGrpcServer>>()
         .await;
+    // From this point on, DeltaTxnService's status may keep changing --
+    // see spawn_storage_health_probe's own doc comment for exactly when
+    // and why -- so "SERVING for the rest of the process's life" is no
+    // longer the whole story the way it used to be.
+    if let Ok(endpoint) = std::env::var("AWS_ENDPOINT_URL") {
+        spawn_storage_health_probe(health_reporter, endpoint);
+    }
 
     let meter = global::meter("delta-txn-service");
     let metrics_layer = GrpcMetricsLayer::new(meter);
@@ -76,7 +204,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     server
         .add_service(svc)
         .add_service(health_service)
-        .serve(grpc_config.addr)
+        .serve_with_shutdown(grpc_config.addr, shutdown_signal())
         .await?;
 
     Ok(())

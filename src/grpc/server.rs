@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::pin::Pin;
 
 use deltalake::kernel::scalars::ScalarExt;
+use deltalake::kernel::Action;
 use deltalake::table::state::DeltaTableState;
 use deltalake::{ensure_table_uri, DeltaTableError};
 use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
@@ -19,7 +20,10 @@ use crate::config::storage::{
     is_table_uri_allowed, load_allowed_table_prefixes, load_storage_options,
 };
 use crate::delta::errors::DeltaTxnError;
-use crate::delta::{commit::commit_actions, table::open_table};
+use crate::delta::{
+    commit::{commit_actions, create_table},
+    table::{open_table, table_exists},
+};
 use crate::grpc::mapping::{map_actions, map_active_file_to_pb};
 use crate::locking::table_lock::TableLockManager;
 
@@ -77,9 +81,25 @@ impl DeltaTxnGrpcServer {
             );
         }
 
+        Self::with_config(load_storage_options(), allowed_table_prefixes)
+    }
+
+    /// Constructs a server from already-resolved configuration rather than
+    /// reading it from the environment -- what `new()` itself delegates to
+    /// after doing that env read. Exists for the integration test suite
+    /// (tests/): mutating process-global env vars (e.g.
+    /// DELTA_TXN_ALLOWED_TABLE_PREFIXES) per test is fragile under Rust's
+    /// default parallel test execution, since tests share one process; this
+    /// gives tests an explicit config seam instead. No startup warning here
+    /// (unlike `new()`) since a test passing `None` on purpose isn't an
+    /// operator misconfiguration to flag.
+    pub fn with_config(
+        storage_opts: HashMap<String, String>,
+        allowed_table_prefixes: Option<Vec<String>>,
+    ) -> Self {
         Self {
             locks: TableLockManager::default(),
-            storage_opts: load_storage_options(),
+            storage_opts,
             allowed_table_prefixes,
         }
     }
@@ -131,7 +151,7 @@ fn build_metadata_and_protocol(
             name: metadata.name().unwrap_or_default().to_string(),
             description: metadata.description().unwrap_or_default().to_string(),
             schema_string,
-            partition_columns: metadata.partition_columns().clone(),
+            partition_columns: metadata.partition_columns().to_vec(),
             configuration: metadata.configuration().clone(),
             created_time: metadata.created_time().unwrap_or_default(),
         },
@@ -142,6 +162,13 @@ fn build_metadata_and_protocol(
     ))
 }
 
+// The "table_uri doesn't exist at all" case is caught earlier by every
+// caller's own table_exists() check (returning Status::not_found before
+// this is ever reached) -- NotInitialized is left handled here defensively
+// for whatever narrower "log exists but couldn't be loaded into a usable
+// snapshot" state delta-rs might still produce that isn't captured by
+// table_exists's own is_delta_table_location() probe, not because it's the
+// primary path anymore.
 fn map_open_or_snapshot_error(e: DeltaTableError) -> Status {
     match e {
         DeltaTableError::NotInitialized => Status::failed_precondition("table not initialized"),
@@ -173,6 +200,15 @@ async fn stream_active_files_inner(
     storage_opts: HashMap<String, String>,
     tx: &tokio::sync::mpsc::Sender<Result<ListActiveFilesResponse, Status>>,
 ) -> Result<(), Status> {
+    if !table_exists(table_uri.as_str(), storage_opts.clone())
+        .await
+        .map_err(Status::from)?
+    {
+        return Err(Status::not_found(format!(
+            "table_uri '{table_uri}' does not exist"
+        )));
+    }
+
     let table = open_table(table_uri.as_str(), storage_opts)
         .await
         .map_err(Status::from)?;
@@ -183,7 +219,10 @@ async fn stream_active_files_inner(
     let header = ListActiveFilesResponse {
         payload: Some(list_active_files_response::Payload::Header(
             ListActiveFilesHeader {
-                version: snapshot.version(),
+                // delta-rs's Snapshot::version() returns u64; the wire
+                // contract (delta_txn.proto) uses int64 throughout, and a
+                // real table version never approaches i64::MAX.
+                version: snapshot.version() as i64,
                 metadata: Some(metadata),
                 protocol: Some(protocol),
             },
@@ -282,6 +321,23 @@ impl DeltaTxnService for DeltaTxnGrpcServer {
         let r = req.into_inner();
         let table_uri = r.table_uri;
 
+        // Checked against the raw, client-supplied string *before*
+        // ensure_table_uri() below: for a `file://`/bare-local-path
+        // table_uri, ensure_table_uri() creates the local directory as a
+        // side effect (delta-rs's own documented behavior for
+        // ensure_table_uri -- see its own doc comment), unconditionally,
+        // even for a table_uri that's about to be rejected by the
+        // allowlist. This first check means a table_uri outside the
+        // allowlist never reaches that call at all, so no directory gets
+        // created for a request that was never going to be allowed to use
+        // it. It's a fast-path rejection, not the authorization decision
+        // itself -- the check against the *normalized* URI right after
+        // ensure_table_uri() (unchanged, still required) remains the
+        // actual source of truth, since normalization can occasionally
+        // change which configured prefix a URI matches (trailing slashes,
+        // relative paths) in ways this raw check can't account for.
+        self.check_table_uri_allowed(&table_uri)?;
+
         let normalized_table_uri =
             ensure_table_uri(&table_uri).map_err(|e| Status::invalid_argument(e.to_string()))?;
 
@@ -293,23 +349,66 @@ impl DeltaTxnService for DeltaTxnGrpcServer {
         // trip to storage or the per-table lock held while it's rejected.
         let actions = map_actions(r.actions).map_err(|e| Status::invalid_argument(e))?;
 
-        // Held across the whole open-table -> version-check -> commit
-        // sequence below, not just the commit call itself -- see
+        // Held across the whole exists-check -> open-table -> version-check
+        // -> commit sequence below, not just the commit call itself -- see
         // TableLockManager's own doc comment for why the version check has
         // to be inside the locked section too (otherwise two concurrent
         // commits could both read the same "current" version and both
-        // pass their own expected_version check before either writes).
+        // pass their own expected_version check before either writes). The
+        // exists-check has to be in here for the same reason: otherwise
+        // two concurrent Commits to the same brand-new table_uri could
+        // both see "doesn't exist yet" and both attempt to create it.
         let lock = self.locks.lock_for(normalized_table_uri.as_str());
         let _guard = lock.lock().await;
+
+        // table_exists() first, not a bare open_table(): open_table (via
+        // delta-rs's own open_table_with_storage_options) fails outright
+        // for a table_uri with no _delta_log at all, indistinguishable at
+        // that point from a genuine storage error -- see table_exists's
+        // own doc comment. A brand-new table_uri isn't a failure here,
+        // it's this RPC's other job: create the table from `actions`'
+        // own Protocol/Metadata, exactly like the very first commit any
+        // Delta writer makes to a location nothing has written to yet.
+        if !table_exists(normalized_table_uri.as_str(), self.storage_opts.clone())
+            .await
+            .map_err(Status::from)?
+        {
+            if r.expected_version.is_some() {
+                return Err(Status::failed_precondition(
+                    "expected_version was set but table_uri does not exist yet -- omit \
+                     expected_version on the Commit that creates a new table",
+                ));
+            }
+            let has_protocol = actions.iter().any(|a| matches!(a, Action::Protocol(_)));
+            let has_metadata = actions.iter().any(|a| matches!(a, Action::Metadata(_)));
+            if !(has_protocol && has_metadata) {
+                return Err(Status::failed_precondition(
+                    "table_uri does not exist yet -- the Commit that creates a new table must \
+                     include both a Protocol and a TableMetadata action",
+                ));
+            }
+
+            let version = create_table(normalized_table_uri, self.storage_opts.clone(), actions)
+                .await
+                .map_err(|e| Status::from(e))?;
+
+            return Ok(Response::new(CommitResponse {
+                committed_version: version,
+            }));
+        }
 
         let table = open_table(normalized_table_uri.as_str(), self.storage_opts.clone())
             .await
             .map_err(|e| Status::from(e))?;
 
         if let Some(expected) = r.expected_version {
+            // delta-rs's DeltaTable::version() returns u64; expected/actual
+            // (and the wire contract, delta_txn.proto) are int64 -- see the
+            // matching comment on snapshot.version() below.
             let current = table
                 .version()
-                .ok_or_else(|| Status::failed_precondition("table not initialized"))?;
+                .ok_or_else(|| Status::failed_precondition("table not initialized"))?
+                as i64;
             if current != expected {
                 return Err(Status::from(DeltaTxnError::VersionConflict {
                     expected,
@@ -340,10 +439,25 @@ impl DeltaTxnService for DeltaTxnGrpcServer {
         let r = req.into_inner();
         let table_uri = r.table_uri;
 
+        // See commit()'s own comment on this same check: prevents
+        // ensure_table_uri() below from creating a local directory as a
+        // side effect for a table_uri the allowlist was always going to
+        // reject.
+        self.check_table_uri_allowed(&table_uri)?;
+
         let normalized_table_uri =
             ensure_table_uri(&table_uri).map_err(|e| Status::invalid_argument(e.to_string()))?;
 
         self.check_table_uri_allowed(normalized_table_uri.as_str())?;
+
+        if !table_exists(normalized_table_uri.as_str(), self.storage_opts.clone())
+            .await
+            .map_err(Status::from)?
+        {
+            return Err(Status::not_found(format!(
+                "table_uri '{normalized_table_uri}' does not exist"
+            )));
+        }
 
         let table = open_table(normalized_table_uri.as_str(), self.storage_opts.clone())
             .await
@@ -353,7 +467,8 @@ impl DeltaTxnService for DeltaTxnGrpcServer {
         let (metadata, protocol) = build_metadata_and_protocol(snapshot)?;
 
         Ok(Response::new(GetTableResponse {
-            version: snapshot.version(),
+            // See stream_active_files_inner's matching cast comment above.
+            version: snapshot.version() as i64,
             metadata: Some(metadata),
             protocol: Some(protocol),
         }))
@@ -379,6 +494,12 @@ impl DeltaTxnService for DeltaTxnGrpcServer {
     ) -> Result<Response<Self::ListActiveFilesStream>, Status> {
         let r = req.into_inner();
         let table_uri = r.table_uri;
+
+        // See commit()'s own comment on this same check: prevents
+        // ensure_table_uri() below from creating a local directory as a
+        // side effect for a table_uri the allowlist was always going to
+        // reject.
+        self.check_table_uri_allowed(&table_uri)?;
 
         let normalized_table_uri =
             ensure_table_uri(&table_uri).map_err(|e| Status::invalid_argument(e.to_string()))?;

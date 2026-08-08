@@ -8,10 +8,13 @@ license = "Apache-2.0"
 # -----------------------------
 # Async runtime
 # -----------------------------
-tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "signal"] }
 # ReceiverStream, adapting a tokio::sync::mpsc::Receiver into the
 # futures_core::Stream ListActiveFiles' server-streaming response needs.
-tokio-stream = "0.1.17"
+# `net`: TcpListenerStream, used only by the integration test harness
+# (tests/common/mod.rs) to serve on an OS-assigned ephemeral port and learn
+# its actual address before handing the listener to tonic.
+tokio-stream = { version = "0.1.17", features = ["net"] }
 
 # -----------------------------
 # gRPC / Protobuf
@@ -37,7 +40,12 @@ pin-project-lite = "0.2.17"
 # -----------------------------
 # Delta Lake (native)
 # -----------------------------
-deltalake = { version = "0.30.2", features = ["s3", "datafusion"] }
+deltalake = { version = "0.32.4", features = ["s3", "datafusion"] }
+# Already resolved transitively (deltalake's own table_uri/log_store types
+# use it); declared directly since delta::table::table_exists and
+# delta::commit::create_table now name `url::Url` themselves rather than
+# only ever passing it through opaquely.
+url = "2.5.8"
 
 # -----------------------------
 # Concurrency / locking
@@ -63,7 +71,28 @@ opentelemetry_sdk = { version = "0.32.1", features = ["rt-tokio"] }
 [build-dependencies]
 tonic-prost-build = "0.14.3"
 
+[dev-dependencies]
+# tests/ (the gRPC integration test suite) creates each test's Delta table
+# under a throwaway `file://` tempdir -- no S3/MinIO dependency, so the
+# suite runs anywhere `cargo test` does, including the Docker build's own
+# `RUN cargo test --release` step.
+tempfile = "3.27.0"
+
 [profile.release]
 lto = true
 codegen-units = 1
 strip = true
+
+# `cargo test --release` builds test binaries against [profile.release]
+# directly (verified against cargo 1.94.1 -- there is no separate `bench`
+# profile indirection to override here). Fat LTO + a single codegen unit
+# for every test binary, on top of the already-massive deltalake+datafusion
+# dependency graph, is enough peak memory during linking to OOM a Docker
+# build (this crashed WSL2). Test binaries only need to be correct, not
+# link-time-optimized, so the Dockerfile and ci.yml invoke
+# `cargo test --profile release-test` instead of `--release`, picking up
+# this profile, which turns both off.
+[profile.release-test]
+inherits = "release"
+lto = false
+codegen-units = 16

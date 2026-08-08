@@ -34,7 +34,7 @@ This project provides:
 
 ## What this service does
 
-✅ Opens Delta tables  
+✅ Opens Delta tables, and creates new ones on the first `Commit` to a table_uri that doesn't exist yet  
 ✅ Enforces optimistic concurrency (`expected_version`)  
 ✅ Applies ordered Delta actions (`AddFile`, `RemoveFile`, `Protocol`, `Metadata`)  
 ✅ Commits atomically using `delta-rs`  
@@ -94,6 +94,10 @@ Atomically commit Delta actions.
 
 - Optimistic concurrency via `expected_version`
 - Fully typed protobuf actions (no JSON)
+- If `table_uri` doesn't exist yet, this Commit creates it as the table's version-0 commit —
+  `actions` must include both a `Protocol` and a `TableMetadata` action, and `expected_version`
+  must be left unset. Every subsequent `Commit` to that `table_uri` behaves as an ordinary
+  append/update against the now-existing table.
 
 ### `ListActiveFiles`
 Server-streaming: every currently-active (not yet removed) data file for a

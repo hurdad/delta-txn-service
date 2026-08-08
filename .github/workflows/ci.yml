@@ -45,3 +45,61 @@ jobs:
           push: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # The Docker-based job above runs tests/ against the file:// filesystem
+  # backend only (see tests/README.md) -- fast, dependency-free, and
+  # exactly what runs inside the Docker build docker-publish.yml also uses.
+  # This job instead runs tests/e2e_minio.rs against a real S3-compatible
+  # backend: object_store's LocalFileSystem and S3 implementations don't
+  # share identical semantics (conditional-put behavior in particular,
+  # which is exactly what this service's optimistic-concurrency conflict
+  # detection depends on), so passing against `file://` alone doesn't prove
+  # the same logic is correct against S3-shaped storage. Every other test
+  # file under tests/ still only needs `file://` and isn't duplicated here.
+  minio-integration-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # GitHub Actions' `services:` block has no way to override a
+      # container's command, and the plain `minio/minio` image needs
+      # `server /data` arguments to actually run its server (the bare
+      # default CMD just prints usage and exits) -- so this starts it
+      # directly instead of via `services:`.
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio \
+            -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin \
+            -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio:RELEASE.2024-01-18T22-51-28Z server /data
+          timeout 30 bash -c 'until curl -sf http://localhost:9000/minio/health/live; do sleep 1; done'
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.94.0
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # Matches the Dockerfile's own builder-stage apt-get install:
+      # protobuf-compiler for tonic-prost-build's protoc invocation,
+      # pkg-config/libssl-dev for delta-rs's OpenSSL dependency.
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler pkg-config libssl-dev
+
+      - name: Create the MinIO test bucket
+        env:
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin
+        run: aws --endpoint-url http://localhost:9000 --region us-east-1 s3 mb s3://delta-txn-service-ci
+
+      - name: Run MinIO-backed integration tests
+        env:
+          AWS_ENDPOINT_URL: http://localhost:9000
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin
+          AWS_REGION: us-east-1
+          AWS_ALLOW_HTTP: "true"
+          DELTA_TXN_TEST_S3_BUCKET: delta-txn-service-ci
+        run: cargo test --release --test e2e_minio

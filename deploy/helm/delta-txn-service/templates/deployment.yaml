@@ -27,12 +27,27 @@ spec:
             - name: grpc
               containerPort: {{ .Values.service.port }}
               protocol: TCP
+          # Checks the delta.txn.v1.DeltaTxnService-specific status, not
+          # the overall-server default -- when AWS_ENDPOINT_URL is set
+          # (main.rs's own spawn_storage_health_probe), that status
+          # reflects real object-store reachability, so a storage outage
+          # pulls this pod out of the Service's endpoints without
+          # restarting it.
           readinessProbe:
             grpc:
               port: {{ .Values.service.port }}
+              service: "delta.txn.v1.DeltaTxnService"
             initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 5
+          # Deliberately checks the overall-server default status (no
+          # `service:` field), not delta.txn.v1.DeltaTxnService -- unlike
+          # readiness above, liveness must stay independent of storage
+          # reachability: restarting this pod doesn't fix a downstream
+          # storage outage, and cycling pods repeatedly during one is its
+          # own antipattern. This only ever reflects "is the process
+          # itself alive and serving gRPC," which is what should decide
+          # whether Kubernetes restarts it.
           livenessProbe:
             grpc:
               port: {{ .Values.service.port }}

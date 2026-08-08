@@ -19,17 +19,31 @@ RUN apt-get update && apt-get install -y \
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && echo "fn main() {}" > src/main.rs
 RUN cargo build --release
+# Warms the release-test-profile dependency build too (see Cargo.toml's
+# [profile.release-test] comment) -- `cargo test` below uses that profile,
+# and without this it would recompile the whole dependency graph from
+# scratch under a differently-cached profile on every source change.
+RUN cargo test --profile release-test --no-run
 RUN rm -rf src
 
 # Copy real source
 COPY build.rs .
 COPY proto ./proto
 COPY src ./src
+# The gRPC integration test suite (tests/README.md) -- without this, `cargo
+# test` below finds no tests/ directory at all and silently runs zero
+# integration tests, passing "successfully" while covering nothing beyond
+# the unit tests embedded in src/.
+COPY tests ./tests
 
 # Build the real binary
 RUN cargo build --release
-# Run tests to validate the build artifacts
-RUN cargo test --release
+# Run tests to validate the build artifacts. Uses the release-test profile
+# (Cargo.toml), not --release directly -- see that profile's comment: fat
+# LTO + codegen-units=1 against test binaries, on top of the
+# deltalake+datafusion dependency graph, is enough peak memory during
+# linking to OOM a Docker build.
+RUN cargo test --profile release-test
 
 
 # ======================================================

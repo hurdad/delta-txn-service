@@ -1,0 +1,26 @@
+# Automated dependency-update PRs, one ecosystem per section below --
+# without this, keeping up with security fixes across this crate's
+# dependency graph (deltalake, tonic, aws-sdk, opentelemetry -- a stack
+# that moves quickly) has relied entirely on periodic manual audits.
+version: 2
+updates:
+  # Cargo.toml/Cargo.lock -- this crate's own Rust dependencies.
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+
+  # .github/workflows/*.yml -- the actions (checkout, buildx,
+  # docker/build-push-action, etc.) this repo's own CI/publish workflows
+  # pin versions of.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # Dockerfile's own base images (rust:1.94-trixie, debian:trixie-slim).
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"

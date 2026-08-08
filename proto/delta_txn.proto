@@ -98,7 +98,12 @@ message ListActiveFilesBatch {
 // ======================================================
 
 message CommitRequest {
-  // Same meaning/validation as GetTableRequest.table_uri above.
+  // Same meaning/validation as GetTableRequest.table_uri above. If nothing
+  // exists at this table_uri yet, this Commit *creates* the table as its
+  // version-0 commit -- `actions` must then include both a Protocol and a
+  // TableMetadata action (gRPC FAILED_PRECONDITION otherwise, naming
+  // whichever is missing); `expected_version` must be unset in that case,
+  // since there is no existing version yet to have expected.
   string table_uri = 1;
 
   // Optimistic concurrency check: if set, the commit is rejected (gRPC
@@ -110,7 +115,8 @@ message CommitRequest {
   // internal optimistic-concurrency retry (against a freshly re-read
   // snapshot, up to its own retry limit) as protection. Most callers
   // should set this, using a version previously observed via GetTable or
-  // a prior Commit's own response.
+  // a prior Commit's own response. Must be unset when this Commit is the
+  // one creating a new table (see table_uri above).
   optional int64 expected_version = 2;
 
   // Applied as a single ordered transaction -- order matters (e.g. a
