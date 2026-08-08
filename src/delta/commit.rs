@@ -39,21 +39,26 @@ fn default_write_operation() -> DeltaOperation {
 /// never a richer type, since the wire representation is a flat
 /// `map<string, string>`), returning `None` for a missing key or a
 /// present-but-non-string value.
-fn string_param(params: &Option<std::collections::HashMap<String, serde_json::Value>>, key: &str) -> Option<String> {
-    params
-        .as_ref()?
-        .get(key)?
-        .as_str()
-        .map(|s| s.to_string())
+fn string_param(
+    params: &Option<std::collections::HashMap<String, serde_json::Value>>,
+    key: &str,
+) -> Option<String> {
+    params.as_ref()?.get(key)?.as_str().map(|s| s.to_string())
 }
 
-fn int_param(params: &Option<std::collections::HashMap<String, serde_json::Value>>, key: &str) -> Option<i64> {
+fn int_param(
+    params: &Option<std::collections::HashMap<String, serde_json::Value>>,
+    key: &str,
+) -> Option<i64> {
     params.as_ref()?.get(key)?.as_i64()
 }
 
 // `DeltaOperation::Restore`'s `version` field is u64 (delta-rs versions are
 // always non-negative); every other int_param() call site below stays i64.
-fn uint_param(params: &Option<std::collections::HashMap<String, serde_json::Value>>, key: &str) -> Option<u64> {
+fn uint_param(
+    params: &Option<std::collections::HashMap<String, serde_json::Value>>,
+    key: &str,
+) -> Option<u64> {
     params.as_ref()?.get(key)?.as_u64()
 }
 
@@ -246,7 +251,10 @@ mod tests {
     use deltalake::kernel::Protocol;
     use std::collections::HashMap;
 
-    fn commit_info_action(operation: Option<&str>, params: Vec<(&str, serde_json::Value)>) -> Action {
+    fn commit_info_action(
+        operation: Option<&str>,
+        params: Vec<(&str, serde_json::Value)>,
+    ) -> Action {
         Action::CommitInfo(CommitInfo {
             operation: operation.map(|s| s.to_string()),
             operation_parameters: if params.is_empty() {
@@ -282,7 +290,10 @@ mod tests {
         let actions = vec![commit_info_action(
             Some("OPTIMIZE"),
             vec![
-                ("predicate", serde_json::Value::String("region = 'US'".into())),
+                (
+                    "predicate",
+                    serde_json::Value::String("region = 'US'".into()),
+                ),
                 ("target_size", serde_json::json!(134217728)),
             ],
         )];

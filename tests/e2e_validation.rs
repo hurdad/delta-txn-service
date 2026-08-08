@@ -96,7 +96,11 @@ async fn commit_that_creates_a_table_rejects_expected_version_being_set() {
     // attempt above -- a subsequent, correctly-formed create should still
     // land at version 0, not find a table already there.
     let commit_response = client
-        .commit(commit_request(&table_uri, None, create_table_actions("brand-new")))
+        .commit(commit_request(
+            &table_uri,
+            None,
+            create_table_actions("brand-new"),
+        ))
         .await
         .expect("a correctly-formed create commit should still succeed afterwards")
         .into_inner();
@@ -110,7 +114,11 @@ async fn commit_rejects_an_action_with_unspecified_data_change() {
     let mut client = server.connect().await;
 
     client
-        .commit(commit_request(&table_uri, None, create_table_actions("orders")))
+        .commit(commit_request(
+            &table_uri,
+            None,
+            create_table_actions("orders"),
+        ))
         .await
         .expect("create commit should succeed");
 

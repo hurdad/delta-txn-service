@@ -103,8 +103,12 @@ fn map_stats_json_to_pb(stats_json: Option<String>) -> Option<pb::FileStats> {
 
     let mut columns = std::collections::HashMap::new();
     for column in column_names {
-        let min_value = min_values.and_then(|m| m.get(column)).and_then(value_to_min);
-        let max_value = max_values.and_then(|m| m.get(column)).and_then(value_to_max);
+        let min_value = min_values
+            .and_then(|m| m.get(column))
+            .and_then(value_to_min);
+        let max_value = max_values
+            .and_then(|m| m.get(column))
+            .and_then(value_to_max);
         let null_count = null_counts
             .and_then(|m| m.get(column))
             .and_then(Value::as_i64)
@@ -461,10 +465,7 @@ mod tests {
 
     #[test]
     fn map_data_change_maps_valid_values() {
-        assert_eq!(
-            map_data_change(pb::DataChange::True as i32).unwrap(),
-            true
-        );
+        assert_eq!(map_data_change(pb::DataChange::True as i32).unwrap(), true);
         assert_eq!(
             map_data_change(pb::DataChange::False as i32).unwrap(),
             false
@@ -493,10 +494,7 @@ mod tests {
 
     #[test]
     fn map_engine_info_formats_engine_name_and_version() {
-        assert_eq!(
-            map_engine_info("".to_string(), "".to_string()),
-            None
-        );
+        assert_eq!(map_engine_info("".to_string(), "".to_string()), None);
         assert_eq!(
             map_engine_info("delta".to_string(), "".to_string()),
             Some("delta".to_string())
@@ -715,13 +713,8 @@ mod tests {
         let mut partition_values = HashMap::new();
         partition_values.insert("region".to_string(), None);
 
-        let pb_add = map_active_file_to_pb(
-            "part-0.parquet".to_string(),
-            1,
-            0,
-            partition_values,
-            None,
-        );
+        let pb_add =
+            map_active_file_to_pb("part-0.parquet".to_string(), 1, 0, partition_values, None);
 
         assert_eq!(pb_add.partition_values.get("region"), Some(&String::new()));
         assert!(pb_add.stats.is_none());

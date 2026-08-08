@@ -22,7 +22,11 @@ async fn commit_creates_a_new_table_and_get_table_reads_it_back() {
     let mut client = server.connect().await;
 
     let commit_response = client
-        .commit(commit_request(&table_uri, None, create_table_actions("orders")))
+        .commit(commit_request(
+            &table_uri,
+            None,
+            create_table_actions("orders"),
+        ))
         .await
         .expect("Commit that creates a new table should succeed")
         .into_inner();
@@ -55,7 +59,11 @@ async fn commit_append_advances_version_and_checks_expected_version() {
     let mut client = server.connect().await;
 
     client
-        .commit(commit_request(&table_uri, None, create_table_actions("orders")))
+        .commit(commit_request(
+            &table_uri,
+            None,
+            create_table_actions("orders"),
+        ))
         .await
         .expect("create commit should succeed");
 
@@ -96,7 +104,11 @@ async fn list_active_files_streams_header_then_batch_with_stats() {
     let mut client = server.connect().await;
 
     client
-        .commit(commit_request(&table_uri, None, create_table_actions("orders")))
+        .commit(commit_request(
+            &table_uri,
+            None,
+            create_table_actions("orders"),
+        ))
         .await
         .expect("create commit should succeed");
     client
@@ -143,12 +155,25 @@ async fn list_active_files_streams_header_then_batch_with_stats() {
     assert_eq!(file.data_change, pb::DataChange::True as i32);
     let stats = file.stats.as_ref().expect("expected stats on the file");
     assert_eq!(stats.num_records, 3);
-    let id_stats = stats.columns.get("id").expect("expected stats for column 'id'");
-    assert_eq!(id_stats.min_value, Some(pb::column_stats::MinValue::MinInt(1)));
-    assert_eq!(id_stats.max_value, Some(pb::column_stats::MaxValue::MaxInt(3)));
+    let id_stats = stats
+        .columns
+        .get("id")
+        .expect("expected stats for column 'id'");
+    assert_eq!(
+        id_stats.min_value,
+        Some(pb::column_stats::MinValue::MinInt(1))
+    );
+    assert_eq!(
+        id_stats.max_value,
+        Some(pb::column_stats::MaxValue::MaxInt(3))
+    );
 
     assert!(
-        stream.message().await.expect("stream should not error").is_none(),
+        stream
+            .message()
+            .await
+            .expect("stream should not error")
+            .is_none(),
         "stream should end after exactly one header and one batch for a single-file table"
     );
 }
@@ -160,7 +185,11 @@ async fn list_active_files_excludes_removed_files() {
     let mut client = server.connect().await;
 
     client
-        .commit(commit_request(&table_uri, None, create_table_actions("orders")))
+        .commit(commit_request(
+            &table_uri,
+            None,
+            create_table_actions("orders"),
+        ))
         .await
         .expect("create commit should succeed");
     client
@@ -219,7 +248,11 @@ async fn list_active_files_streams_multiple_batches_for_a_large_file_set() {
     let mut client = server.connect().await;
 
     client
-        .commit(commit_request(&table_uri, None, create_table_actions("wide")))
+        .commit(commit_request(
+            &table_uri,
+            None,
+            create_table_actions("wide"),
+        ))
         .await
         .expect("create commit should succeed");
 

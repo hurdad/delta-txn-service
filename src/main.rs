@@ -164,10 +164,11 @@ fn spawn_storage_health_probe(
         loop {
             ticker.tick().await;
 
-            let reachable = tokio::time::timeout(PROBE_TIMEOUT, TcpStream::connect((host.as_str(), port)))
-                .await
-                .map(|connect_result| connect_result.is_ok())
-                .unwrap_or(false);
+            let reachable =
+                tokio::time::timeout(PROBE_TIMEOUT, TcpStream::connect((host.as_str(), port)))
+                    .await
+                    .map(|connect_result| connect_result.is_ok())
+                    .unwrap_or(false);
 
             if reachable {
                 health_reporter

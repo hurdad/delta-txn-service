@@ -47,9 +47,9 @@ impl From<DeltaTxnError> for tonic::Status {
             // response. Safe to include expected/actual in the message:
             // both came from the client's own request and this service's
             // own version counter, no internal detail leaked.
-            DeltaTxnError::VersionConflict { expected, actual } => tonic::Status::aborted(
-                format!("version conflict: expected {expected}, found {actual}"),
-            ),
+            DeltaTxnError::VersionConflict { expected, actual } => tonic::Status::aborted(format!(
+                "version conflict: expected {expected}, found {actual}"
+            )),
             // OpenFailed/CommitFailed wrap delta-rs's own error strings,
             // which can include storage paths and other internal detail a
             // client has no legitimate need to see -- logged in full here

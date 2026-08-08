@@ -117,9 +117,7 @@ async fn table_uri_outside_the_allowlist_never_creates_a_local_directory() {
     let disallowed_uri = format!("file://{}", disallowed_path.display());
 
     let server = common::TestServer::start(TestServerConfig {
-        allowed_table_prefixes: Some(vec![
-            "file:///this-prefix-matches-nothing".to_string(),
-        ]),
+        allowed_table_prefixes: Some(vec!["file:///this-prefix-matches-nothing".to_string()]),
         ..Default::default()
     })
     .await;

@@ -50,7 +50,8 @@ impl TableLockManager {
     // this exact key cannot run at all until this function's Occupied/
     // Vacant match completes, since both take the same shard lock.
     fn remove_if_unused(&self, key: &str, entry: &Arc<LockEntry>) {
-        if let dashmap::mapref::entry::Entry::Occupied(occupied) = self.locks.entry(key.to_string()) {
+        if let dashmap::mapref::entry::Entry::Occupied(occupied) = self.locks.entry(key.to_string())
+        {
             if Arc::ptr_eq(occupied.get(), entry) && entry.ref_count.load(Ordering::Acquire) == 0 {
                 occupied.remove();
             }
