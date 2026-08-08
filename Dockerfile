@@ -1,7 +1,7 @@
 # ======================================================
 # Builder
 # ======================================================
-FROM rust:1.94-trixie AS builder
+FROM rust:1.97-trixie AS builder
 
 WORKDIR /build
 
