@@ -31,7 +31,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       # Shares the same GitHub Actions cache scope as docker-publish.yml's
       # own build (cache-from/cache-to: type=gha is keyed by repo, not by
