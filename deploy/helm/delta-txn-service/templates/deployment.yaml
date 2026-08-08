@@ -74,9 +74,33 @@ spec:
               value: "{{ .Values.grpc.tls.mountPath }}/{{ .Values.grpc.tls.keyFile }}"
             {{- end }}
             {{- range $key, $value := .Values.storage.aws }}
-            {{- if $value }}
+            {{- if and $value (ne $key "AWS_ACCESS_KEY_ID") (ne $key "AWS_SECRET_ACCESS_KEY") }}
             - name: {{ $key }}
               value: "{{ $value }}"
+            {{- end }}
+            {{- end }}
+            {{- if and .Values.storage.credentialsSecretName (or .Values.storage.aws.AWS_ACCESS_KEY_ID .Values.storage.aws.AWS_SECRET_ACCESS_KEY) }}
+            {{- fail "storage.credentialsSecretName is set but storage.aws.AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY are also non-empty -- clear those plaintext values (they'd otherwise sit unused but still stored in plaintext in the Helm release)." }}
+            {{- end }}
+            {{- if .Values.storage.credentialsSecretName }}
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.storage.credentialsSecretName }}
+                  key: {{ .Values.storage.accessKeyIdSecretKey | default "AWS_ACCESS_KEY_ID" }}
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.storage.credentialsSecretName }}
+                  key: {{ .Values.storage.secretAccessKeySecretKey | default "AWS_SECRET_ACCESS_KEY" }}
+            {{- else }}
+            {{- if .Values.storage.aws.AWS_ACCESS_KEY_ID }}
+            - name: AWS_ACCESS_KEY_ID
+              value: "{{ .Values.storage.aws.AWS_ACCESS_KEY_ID }}"
+            {{- end }}
+            {{- if .Values.storage.aws.AWS_SECRET_ACCESS_KEY }}
+            - name: AWS_SECRET_ACCESS_KEY
+              value: "{{ .Values.storage.aws.AWS_SECRET_ACCESS_KEY }}"
             {{- end }}
             {{- end }}
             {{- if .Values.security.allowedTablePrefixes }}

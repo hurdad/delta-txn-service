@@ -40,10 +40,20 @@ grpc:
 storage:
   aws:
     AWS_ENDPOINT_URL: ""
+    # WARNING: AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY below are rendered in
+    # plaintext into the Deployment's env vars and stored in plaintext in the
+    # Helm release, same as grpc.apiKey above. Use credentialsSecretName for
+    # anything beyond local testing, and leave these two blank when you do --
+    # the chart refuses to render (via `fail`) if both are set at once, so a
+    # migration to credentialsSecretName can't accidentally leave stale
+    # plaintext credentials sitting in the release's stored values.
     AWS_ACCESS_KEY_ID: ""
     AWS_SECRET_ACCESS_KEY: ""
     AWS_REGION: ""
     AWS_ALLOW_HTTP: ""
+  credentialsSecretName: ""
+  accessKeyIdSecretKey: "AWS_ACCESS_KEY_ID"
+  secretAccessKeySecretKey: "AWS_SECRET_ACCESS_KEY"
 
 security:
   # Comma-joined into DELTA_TXN_ALLOWED_TABLE_PREFIXES. Empty means any table_uri
