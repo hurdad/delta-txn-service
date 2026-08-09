@@ -2099,7 +2099,7 @@ dependencies = [
 
 [[package]]
 name = "delta-txn-service"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dashmap",
  "deltalake",
