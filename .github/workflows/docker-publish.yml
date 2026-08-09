@@ -34,8 +34,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      # QEMU was only needed to emulate arm64; not required while that
+      # platform is disabled below.
+      # - name: Set up QEMU
+      #   uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -61,7 +63,11 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          # arm64 disabled: QEMU-emulated arm64 was the dominant cost in the
+          # ~4-hour multi-arch build time that's been blowing the 6-hour CI
+          # timeout. Re-enable (and restore the QEMU step above) once build
+          # time is under control, e.g. via native arm64 runners.
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
