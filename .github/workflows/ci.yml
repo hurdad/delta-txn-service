@@ -59,7 +59,7 @@ jobs:
       # workflow), so a PR build warms the cache the post-merge publish
       # build then reuses, and vice versa.
       - name: Build and test (builder stage -- runs cargo test --release)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           target: builder

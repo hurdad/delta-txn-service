@@ -60,7 +60,7 @@ jobs:
             type=sha
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           # arm64 disabled: QEMU-emulated arm64 was the dominant cost in the
