@@ -40,7 +40,7 @@ pin-project-lite = "0.2.17"
 # -----------------------------
 # Delta Lake (native)
 # -----------------------------
-deltalake = { version = "0.32.4", features = ["s3", "datafusion"] }
+deltalake = { version = "1.0.0", features = ["s3", "datafusion"] }
 # Already resolved transitively (deltalake's own table_uri/log_store types
 # use it); declared directly since delta::table::table_exists and
 # delta::commit::create_table now name `url::Url` themselves rather than
