@@ -30,12 +30,26 @@ grpc:
   apiKey: ""
   apiKeySecretName: ""
   apiKeySecretKey: ""
+  # Named keys (DELTA_TXN_GRPC_API_KEYS), read from a Secret: the value at
+  # apiKeysSecretKey is a comma-separated `name=key` list, e.g.
+  # "ingest=...,reader=...". List the old and new key while rotating.
+  apiKeysSecretName: ""
+  apiKeysSecretKey: "api-keys"
   tls:
     enabled: false
     secretName: ""
     certFile: "tls.crt"
     keyFile: "tls.key"
+    # Mutual TLS: the file (in the same secret) holding the CA that client
+    # certificates must chain to, e.g. "ca.crt" for a cert-manager secret.
+    # Empty disables client-certificate checks.
+    clientCAFile: ""
     mountPath: "/etc/delta-txn/tls"
+  # Empty values keep the service's defaults (see README "Configuration").
+  requestTimeoutSeconds: ""
+  maxConcurrentRequestsPerConnection: ""
+  maxMessageBytes: ""
+  maxActionsPerCommit: ""
 
 storage:
   aws:
@@ -57,8 +71,41 @@ storage:
 
 security:
   # Comma-joined into DELTA_TXN_ALLOWED_TABLE_PREFIXES. Empty means any table_uri
-  # a client supplies is permitted (unrestricted, historical behavior).
+  # a client supplies is permitted.
   allowedTablePrefixes: []
+  # The service refuses to start with neither an API key nor an allowlist.
+  # The chart fails to render in that case too, unless this is true
+  # (DELTA_TXN_ALLOW_INSECURE) -- for throwaway test clusters only.
+  allowInsecure: false
+
+logging:
+  # RUST_LOG filter.
+  level: "info"
+  # "json" for one JSON object per line, or "text".
+  format: "json"
+
+telemetry:
+  # OTLP export over gRPC. Point endpoint at the collector's gRPC port
+  # (usually 4317). Empty endpoints leave export off.
+  serviceName: "delta-txn-service"
+  endpoint: ""
+  tracesEndpoint: ""
+  metricsEndpoint: ""
+
+# Extra container env vars, rendered as-is (a list of EnvVar objects,
+# including valueFrom). For anything the values above don't cover.
+extraEnv: []
+
+networkPolicy:
+  # Restricts ingress to the gRPC port from the listed peers. Egress is not
+  # restricted (object-store endpoints vary too much to template here).
+  enabled: false
+  # NetworkPolicy `from` entries, e.g.:
+  #   - namespaceSelector:
+  #       matchLabels:
+  #         kubernetes.io/metadata.name: data-pipelines
+  # Empty with enabled=true allows only pods in the release namespace.
+  ingressFrom: []
 
 podSecurityContext:
   runAsNonRoot: true
@@ -98,3 +145,12 @@ nodeSelector: {}
 tolerations: []
 
 affinity: {}
+
+# Spread replicas across nodes so one node failure can't take them all.
+# ScheduleAnyway keeps single-node clusters schedulable; use DoNotSchedule
+# for a hard guarantee. The chart fills in the label selector.
+topologySpread:
+  enabled: true
+  maxSkew: 1
+  topologyKey: kubernetes.io/hostname
+  whenUnsatisfiable: ScheduleAnyway

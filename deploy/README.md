@@ -42,8 +42,21 @@ TCP-connect check.
 ```bash
 helm install delta-txn-service deploy/helm/delta-txn-service \
   --set image.repository=ghcr.io/hurdad/delta-txn-service \
-  --set image.tag=<tag>
+  --set image.tag=<tag> \
+  --set grpc.apiKeysSecretName=delta-txn-api-keys \
+  --set 'security.allowedTablePrefixes[0]=s3://my-bucket/tables/'
 ```
+
+The chart refuses to render with neither an API key nor a table allowlist
+(the service itself refuses to start that way too); set
+`security.allowInsecure=true` only for a throwaway test cluster.
+
+Also configurable: mutual TLS (`grpc.tls.clientCAFile`), request limits
+(`grpc.requestTimeoutSeconds` and friends), JSON logs (`logging.format`,
+on by default), OTLP export (`telemetry.*`), arbitrary extra env vars
+(`extraEnv`), a soft spread of replicas across nodes (`topologySpread`,
+on by default) and an ingress NetworkPolicy (`networkPolicy`, off by
+default).
 
 See `values.yaml` for the full set of configurable values, each with an
 inline comment on what it maps to (mostly a 1:1 mapping onto the

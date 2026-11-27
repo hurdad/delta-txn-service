@@ -1,3 +1,7 @@
+{{- $hasKey := or .Values.grpc.apiKey .Values.grpc.apiKeySecretName .Values.grpc.apiKeysSecretName }}
+{{- if and (not $hasKey) (not .Values.security.allowedTablePrefixes) (not .Values.security.allowInsecure) }}
+{{- fail "No API key (grpc.apiKey / grpc.apiKeySecretName / grpc.apiKeysSecretName) and no security.allowedTablePrefixes are set, so any client could read and write any table. Configure one of them, or set security.allowInsecure=true for a throwaway test cluster." }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -65,14 +69,41 @@ spec:
                   key: {{ .Values.grpc.apiKeySecretKey | default "api-key" }}
             {{- else if .Values.grpc.apiKey }}
             - name: DELTA_TXN_GRPC_API_KEY
-              value: "{{ .Values.grpc.apiKey }}"
+              value: {{ .Values.grpc.apiKey | quote }}
+            {{- end }}
+            {{- if .Values.grpc.apiKeysSecretName }}
+            - name: DELTA_TXN_GRPC_API_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.grpc.apiKeysSecretName }}
+                  key: {{ .Values.grpc.apiKeysSecretKey | default "api-keys" }}
             {{- end }}
             {{- if .Values.grpc.tls.enabled }}
             - name: DELTA_TXN_GRPC_TLS_CERT
               value: "{{ .Values.grpc.tls.mountPath }}/{{ .Values.grpc.tls.certFile }}"
             - name: DELTA_TXN_GRPC_TLS_KEY
               value: "{{ .Values.grpc.tls.mountPath }}/{{ .Values.grpc.tls.keyFile }}"
+            {{- if .Values.grpc.tls.clientCAFile }}
+            - name: DELTA_TXN_GRPC_TLS_CLIENT_CA
+              value: "{{ .Values.grpc.tls.mountPath }}/{{ .Values.grpc.tls.clientCAFile }}"
             {{- end }}
+            {{- end }}
+            {{- with .Values.grpc.requestTimeoutSeconds | toString }}{{ if . }}
+            - name: DELTA_TXN_GRPC_REQUEST_TIMEOUT_SECS
+              value: {{ . | quote }}
+            {{- end }}{{ end }}
+            {{- with .Values.grpc.maxConcurrentRequestsPerConnection | toString }}{{ if . }}
+            - name: DELTA_TXN_GRPC_MAX_CONCURRENT_REQUESTS_PER_CONNECTION
+              value: {{ . | quote }}
+            {{- end }}{{ end }}
+            {{- with .Values.grpc.maxMessageBytes | toString }}{{ if . }}
+            - name: DELTA_TXN_GRPC_MAX_MESSAGE_BYTES
+              value: {{ . | quote }}
+            {{- end }}{{ end }}
+            {{- with .Values.grpc.maxActionsPerCommit | toString }}{{ if . }}
+            - name: DELTA_TXN_MAX_ACTIONS_PER_COMMIT
+              value: {{ . | quote }}
+            {{- end }}{{ end }}
             {{- range $key, $value := .Values.storage.aws }}
             {{- if and $value (ne $key "AWS_ACCESS_KEY_ID") (ne $key "AWS_SECRET_ACCESS_KEY") }}
             - name: {{ $key }}
@@ -107,6 +138,33 @@ spec:
             - name: DELTA_TXN_ALLOWED_TABLE_PREFIXES
               value: "{{ join "," .Values.security.allowedTablePrefixes }}"
             {{- end }}
+            {{- if .Values.security.allowInsecure }}
+            - name: DELTA_TXN_ALLOW_INSECURE
+              value: "true"
+            {{- end }}
+            - name: RUST_LOG
+              value: {{ .Values.logging.level | quote }}
+            - name: DELTA_TXN_LOG_FORMAT
+              value: {{ .Values.logging.format | quote }}
+            {{- if .Values.telemetry.serviceName }}
+            - name: OTEL_SERVICE_NAME
+              value: {{ .Values.telemetry.serviceName | quote }}
+            {{- end }}
+            {{- if .Values.telemetry.endpoint }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.telemetry.endpoint | quote }}
+            {{- end }}
+            {{- if .Values.telemetry.tracesEndpoint }}
+            - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+              value: {{ .Values.telemetry.tracesEndpoint | quote }}
+            {{- end }}
+            {{- if .Values.telemetry.metricsEndpoint }}
+            - name: OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
+              value: {{ .Values.telemetry.metricsEndpoint | quote }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
@@ -131,3 +189,13 @@ spec:
         {{- toYaml .Values.tolerations | nindent 8 }}
       affinity:
         {{- toYaml .Values.affinity | nindent 8 }}
+      {{- if .Values.topologySpread.enabled }}
+      topologySpreadConstraints:
+        - maxSkew: {{ .Values.topologySpread.maxSkew }}
+          topologyKey: {{ .Values.topologySpread.topologyKey }}
+          whenUnsatisfiable: {{ .Values.topologySpread.whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "delta-txn-service.name" . }}
+              app.kubernetes.io/instance: {{ .Release.Name }}
+      {{- end }}
