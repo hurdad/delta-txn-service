@@ -4,7 +4,10 @@
 # Pinned to the exact toolchain CI uses (dtolnay/rust-toolchain@1.100.0),
 # rust-toolchain.toml and Cargo.toml's rust-version, so the image and CI
 # build the same way.
-FROM rust:1.100.0-trixie AS builder
+# Pinned by digest (multi-arch index) as well as tag, so a rebuild can't
+# silently pick up a different image under the same tag. Dependabot's docker
+# ecosystem updates tag and digest together.
+FROM rust:1.100.0-trixie@sha256:e84068000361bf3d4a5ba2b7647f62893528b1eb9f847d7a23b493f5ce8ea254 AS builder
 
 WORKDIR /build
 
@@ -71,7 +74,9 @@ RUN file /build/delta-txn-service | grep -Eq "static(ally|-pie) linked"
 # service never runs; this base had none when it was adopted. No shell
 # means `docker exec ... sh` won't work; use an ephemeral debug container
 # (kubectl debug) instead.
-FROM gcr.io/distroless/static-debian13:nonroot
+# Pinned by digest for the same reason as the builder; without it this
+# image (tag has no version) would never get Dependabot updates either.
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:8ce6dd87e9823c5b48dcfb2c8604714ccb351ce59607327bcc4957448da279b5
 
 COPY --from=builder /build/delta-txn-service /usr/local/bin/delta-txn-service
 
