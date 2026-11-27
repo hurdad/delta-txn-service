@@ -65,6 +65,10 @@ pointed at a real S3-compatible backend.
   `_delta_log` is detected and reloaded; TTL expiry, LRU eviction,
   disabling, and time travel bypassing the cache. Every other test file
   also runs through the cache, since `tests/common` enables it.
+- **`bench_snapshot_cache.rs`** — an ignored benchmark: request latency
+  with the snapshot cache on vs. off on tables of different shapes.
+  `cargo test --release --test bench_snapshot_cache -- --ignored --nocapture`;
+  set the `e2e_s3.rs` variables to run it against S3.
 - **`e2e_s3.rs`** — the same kind of coverage against a real
   S3-compatible backend (SeaweedFS in CI), since `object_store`'s S3 and
   local filesystem backends differ in conditional-put semantics — exactly
