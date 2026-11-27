@@ -1,6 +1,6 @@
 [package]
 name = "delta-txn-service"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 # Matches the toolchain pinned in CI (dtolnay/rust-toolchain@1.100.0) and the
 # Dockerfile. Also makes `cargo update` prefer dependency versions that
