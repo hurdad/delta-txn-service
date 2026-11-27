@@ -69,7 +69,13 @@ dashmap = "6.2.1"
 # Serialization / utilities
 # -----------------------------
 thiserror = "2.0.21"
-serde_json = "1.0.154"
+# float_roundtrip: parse floats exactly. The default parser can be off by
+# one ULP, so column min/max stats read back from the Delta log (returned by
+# ListActiveFiles, used by clients to skip files) could differ from what was
+# written -- enough to wrongly skip a file. Found by the property tests in
+# src/grpc/mapping_proptests.rs. Features unify, so delta-rs's own stats
+# parsing in this binary gets exact parsing too.
+serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
 
 # -----------------------------
 # Observability
@@ -91,6 +97,7 @@ tonic-prost-build = "0.14.9"
 mimalloc = { version = "0.1", default-features = false }
 
 [dev-dependencies]
+proptest = "1.12.0"
 rcgen = "0.14.10"
 # tests/ (the gRPC integration test suite) creates each test's Delta table
 # under a throwaway `file://` tempdir -- no S3 dependency, so the

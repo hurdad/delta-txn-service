@@ -623,6 +623,10 @@ fn map_commit_operation(operation: i32) -> Option<String> {
 }
 
 #[cfg(test)]
+#[path = "mapping_proptests.rs"]
+mod proptests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
