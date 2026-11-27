@@ -3,7 +3,7 @@
 # ======================================================
 # Pinned to the exact toolchain CI uses (dtolnay/rust-toolchain@1.94.1) and
 # Cargo.toml's rust-version, so the image and CI build the same way.
-FROM rust:1.94.1-trixie AS builder
+FROM rust:1.99.1-trixie AS builder
 
 WORKDIR /build
 
