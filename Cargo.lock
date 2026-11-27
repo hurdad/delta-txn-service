@@ -1395,6 +1395,7 @@ dependencies = [
  "prost-types",
  "rcgen",
  "rustls",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror",

@@ -242,6 +242,7 @@ impl DeltaTxnGrpcServer {
             };
 
             features::check_domain_metadata(&protocol, &actions).map_err(Status::from)?;
+            features::check_feature_properties(&protocol, &metadata).map_err(Status::from)?;
 
             let version = create_table(
                 normalized_table_uri,
@@ -275,6 +276,13 @@ impl DeltaTxnGrpcServer {
             let current = table.snapshot().map_err(map_open_or_snapshot_error)?;
             let protocol = find_protocol(&actions).unwrap_or_else(|| current.protocol());
             features::check_domain_metadata(protocol, &actions).map_err(Status::from)?;
+            // A metadata or protocol change must leave properties and
+            // protocol agreeing (a protocol change alone could drop a
+            // feature the current properties still turn on).
+            if find_protocol(&actions).is_some() || find_metadata(&actions).is_some() {
+                let metadata = find_metadata(&actions).unwrap_or_else(|| current.metadata());
+                features::check_feature_properties(protocol, metadata).map_err(Status::from)?;
+            }
         }
 
         if let Some(expected) = r.expected_version {

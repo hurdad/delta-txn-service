@@ -152,8 +152,18 @@ impl SnapshotCache {
         self
     }
 
+    /// The cache state. A poisoned lock (a panic while it was held) is
+    /// recovered rather than propagated: the critical sections only do
+    /// map operations, and a cache must never turn one panic into every
+    /// later request panicking too.
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     pub fn len(&self) -> usize {
-        self.state.lock().unwrap().entries.len()
+        self.lock_state().entries.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -229,7 +239,7 @@ impl SnapshotCache {
     /// A clone of the live entry, unless absent or past its TTL (expired
     /// entries are dropped here).
     fn checkout(&self, key: &str) -> Option<(DeltaTable, Instant, Option<CommitMarker>)> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock_state();
         state.clock += 1;
         let clock = state.clock;
         let expired = match state.entries.get_mut(key) {
@@ -260,7 +270,7 @@ impl SnapshotCache {
         full_load_at: Instant,
         marker: Option<CommitMarker>,
     ) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock_state();
         state.clock += 1;
         let clock = state.clock;
         if let Some(existing) = state.entries.get(key) {
@@ -291,7 +301,7 @@ impl SnapshotCache {
     }
 
     fn remove(&self, key: &str) {
-        self.state.lock().unwrap().entries.remove(key);
+        self.lock_state().entries.remove(key);
     }
 }
 

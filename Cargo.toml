@@ -72,6 +72,9 @@ dashmap = "6.2.1"
 # Serialization / utilities
 # -----------------------------
 thiserror = "2.0.21"
+# Skipping add/remove actions unbuilt in GetHistory (delta::history). Already
+# in the tree via deltalake.
+serde = { version = "1.0.229", features = ["derive"] }
 # float_roundtrip: parse floats exactly. The default parser can be off by
 # one ULP, so column min/max stats read back from the Delta log (returned by
 # ListActiveFiles, used by clients to skip files) could differ from what was

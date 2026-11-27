@@ -199,7 +199,11 @@ pub async fn commit_actions(
     let version = result.version();
 
     if version % interval == 0 {
-        checkpoint_after_commit(table, version).await;
+        // In the background: the commit has landed, and a checkpoint of a
+        // large table can take seconds. Awaited here it would delay the
+        // response and could outlast the request timeout, so the client
+        // would get DEADLINE_EXCEEDED for a commit that succeeded.
+        tokio::spawn(checkpoint_after_commit(table, version));
     }
     Ok(version as i64)
 }
@@ -214,6 +218,8 @@ pub async fn commit_actions(
 /// landed, so a client would see a failure for a committed version and
 /// might retry it. Here a failure is only logged; the next interval (or
 /// any other writer) checkpoints instead, and readers are unaffected.
+/// Runs in a spawned task; one lost to a shutdown is likewise just
+/// written at the next interval.
 async fn checkpoint_after_commit(mut table: deltalake::DeltaTable, version: u64) {
     let result = async {
         table.update_incremental(Some(version)).await?;

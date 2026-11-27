@@ -452,20 +452,29 @@ async fn commits_write_checkpoints_at_the_table_interval() {
         .to_file_path()
         .unwrap()
         .join("_delta_log");
-    let mut checkpoints: Vec<String> = std::fs::read_dir(&log_dir)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().into_string().unwrap())
-        .filter(|n| n.contains(".checkpoint."))
-        .collect();
-    checkpoints.sort();
-    assert_eq!(
-        checkpoints,
-        vec![
-            "00000000000000000005.checkpoint.parquet",
-            "00000000000000000010.checkpoint.parquet"
-        ]
-    );
-    assert!(log_dir.join("_last_checkpoint").exists());
+    // Checkpoints are written in the background after the commit returns.
+    let list_checkpoints = || {
+        let mut names: Vec<String> = std::fs::read_dir(&log_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|n| n.contains(".checkpoint."))
+            .collect();
+        names.sort();
+        names
+    };
+    let expected = vec![
+        "00000000000000000005.checkpoint.parquet",
+        "00000000000000000010.checkpoint.parquet",
+    ];
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while list_checkpoints() != expected || !log_dir.join("_last_checkpoint").exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "checkpoints never appeared: {:?}",
+            list_checkpoints()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
 
     let count_files = |version: Option<i64>| {
         let mut client = client.clone();
@@ -721,6 +730,102 @@ async fn appending_to_a_foreign_unwritable_table_is_a_failed_precondition() {
             table_uri: uri,
             ..Default::default()
         })
+        .await
+        .unwrap();
+}
+
+/// Table properties that turn a feature on need that feature in the
+/// protocol, at create time and in later metadata or protocol changes.
+#[tokio::test]
+async fn feature_properties_must_match_the_protocol() {
+    let server = common::TestServer::start(Default::default()).await;
+    let mut client = server.connect().await;
+    let with_config = |config: &[(&str, &str)]| {
+        let mut metadata = sample_metadata("props");
+        for (k, v) in config {
+            metadata.configuration.insert(k.to_string(), v.to_string());
+        }
+        pb::Action {
+            action: Some(pb::action::Action::MetaData(metadata)),
+        }
+    };
+    let protocol = |reader: i32, writer: i32, rf: &[&str], wf: &[&str]| pb::Action {
+        action: Some(pb::action::Action::Protocol(pb::Protocol {
+            min_reader_version: reader,
+            min_writer_version: writer,
+            reader_features: rf.iter().map(|s| s.to_string()).collect(),
+            writer_features: wf.iter().map(|s| s.to_string()).collect(),
+        })),
+    };
+
+    // Create: refused, and nothing is created.
+    for (key, value) in [
+        ("delta.enableChangeDataFeed", "true"),
+        ("delta.columnMapping.mode", "name"),
+        ("delta.enableDeletionVectors", "true"),
+        ("delta.enableRowTracking", "true"),
+    ] {
+        let uri = server.new_table_uri(&format!("props-{key}"));
+        let err = client
+            .commit(commit_request(
+                &uri,
+                None,
+                vec![protocol(1, 2, &[], &[]), with_config(&[(key, value)])],
+            ))
+            .await
+            .expect_err(key);
+        assert_eq!(err.code(), Code::FailedPrecondition, "{key}: {err:?}");
+        assert!(err.message().contains(key), "{}", err.message());
+    }
+
+    // Deletion vectors with their feature: fine.
+    let uri = server.new_table_uri("props-dv");
+    let dv = protocol(3, 7, &["deletionVectors"], &["deletionVectors"]);
+    client
+        .commit(commit_request(
+            &uri,
+            None,
+            vec![
+                dv.clone(),
+                with_config(&[("delta.enableDeletionVectors", "true")]),
+            ],
+        ))
+        .await
+        .expect("deletion vectors with their feature");
+
+    // A later metadata change turning on a missing feature: refused.
+    let err = client
+        .commit(commit_request(
+            &uri,
+            Some(0),
+            vec![with_config(&[
+                ("delta.enableDeletionVectors", "true"),
+                ("delta.enableChangeDataFeed", "true"),
+            ])],
+        ))
+        .await
+        .expect_err("metadata change");
+    assert_eq!(err.code(), Code::FailedPrecondition, "{err:?}");
+
+    // A protocol change dropping a feature the properties still turn on:
+    // refused.
+    let err = client
+        .commit(commit_request(
+            &uri,
+            Some(0),
+            vec![protocol(3, 7, &[], &[])],
+        ))
+        .await
+        .expect_err("protocol downgrade");
+    assert_eq!(err.code(), Code::FailedPrecondition, "{err:?}");
+
+    // Ordinary appends are unaffected.
+    client
+        .commit(commit_request(
+            &uri,
+            Some(0),
+            vec![add_file_action("a.parquet", 1)],
+        ))
         .await
         .unwrap();
 }

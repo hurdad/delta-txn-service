@@ -288,6 +288,13 @@ async fn history_ends_at_the_oldest_commit_the_log_still_holds() {
         .to_file_path()
         .unwrap()
         .join("_delta_log");
+    // The checkpoint is written in the background after the commit.
+    let checkpoint = log_dir.join("00000000000000000003.checkpoint.parquet");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !(checkpoint.exists() && log_dir.join("_last_checkpoint").exists()) {
+        assert!(std::time::Instant::now() < deadline, "no checkpoint");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
     for v in 0..3 {
         std::fs::remove_file(log_dir.join(format!("{v:020}.json"))).unwrap();
     }

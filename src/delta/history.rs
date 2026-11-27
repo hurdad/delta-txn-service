@@ -11,6 +11,8 @@ use deltalake::kernel::CommitInfo;
 use deltalake::logstore::object_store::{self, ObjectStoreExt};
 use deltalake::{DeltaTable, Path};
 use futures::stream::{self, StreamExt, TryStreamExt};
+use serde::de::IgnoredAny;
+use serde::Deserialize;
 use serde_json::Value;
 
 use super::errors::DeltaTxnError;
@@ -131,6 +133,17 @@ async fn read_commit(
     Ok(Some(entry))
 }
 
+/// One line of a commit file. Delta actions are single-key objects; add
+/// and remove are skipped without being built (IgnoredAny), so a page of
+/// large commits doesn't hold every file action in memory.
+#[derive(Deserialize)]
+struct LogLine {
+    add: Option<IgnoredAny>,
+    remove: Option<IgnoredAny>,
+    #[serde(rename = "commitInfo")]
+    commit_info: Option<Value>,
+}
+
 /// Parses one commit file (newline-delimited JSON actions). Only the
 /// commitInfo action is deserialized in full; others are just counted.
 /// `timestamp_ms` is 0 when the commit records none.
@@ -142,16 +155,18 @@ pub fn parse_commit(version: u64, bytes: &[u8]) -> Result<HistoryEntry, serde_js
         num_add_files: 0,
         num_remove_files: 0,
     };
-    for action in serde_json::Deserializer::from_slice(bytes).into_iter::<Value>() {
-        let action = action?;
-        if action.get("add").is_some() {
+    for line in serde_json::Deserializer::from_slice(bytes).into_iter::<LogLine>() {
+        let line = line?;
+        if line.add.is_some() {
             entry.num_add_files += 1;
-        } else if action.get("remove").is_some() {
+        }
+        if line.remove.is_some() {
             entry.num_remove_files += 1;
-        } else if let Some(info) = action.get("commitInfo") {
+        }
+        if let Some(info) = line.commit_info {
             // A malformed commitInfo is history metadata, not table state:
             // keep the entry without it rather than failing the request.
-            entry.commit_info = serde_json::from_value(info.clone()).ok();
+            entry.commit_info = serde_json::from_value(info).ok();
         }
     }
     if let Some(info) = &entry.commit_info {

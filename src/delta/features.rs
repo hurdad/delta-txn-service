@@ -17,7 +17,7 @@
 //! delta-rs upgrade that changes the list fails a test instead of drifting.
 
 use deltalake::kernel::transaction::PROTOCOL;
-use deltalake::kernel::{Action, Protocol};
+use deltalake::kernel::{Action, Metadata, Protocol};
 
 use super::errors::DeltaTxnError;
 
@@ -76,6 +76,80 @@ pub fn check_writable(protocol: &Protocol) -> Result<(), DeltaTxnError> {
              change data feed, generated or identity columns, column mapping) this service \
              can't write; use writer version 2, or 7 with supported features"
         ))),
+    }
+}
+
+/// Table properties that turn a table feature on, and the feature each
+/// needs (Delta protocol; Spark upgrades the protocol or refuses when one
+/// is set). `None` value: any value other than "none" turns it on.
+const FEATURE_PROPERTIES: &[(&str, Option<&str>, &str)] = &[
+    ("delta.appendOnly", Some("true"), "appendOnly"),
+    ("delta.enableChangeDataFeed", Some("true"), "changeDataFeed"),
+    (
+        "delta.enableDeletionVectors",
+        Some("true"),
+        "deletionVectors",
+    ),
+    ("delta.columnMapping.mode", None, "columnMapping"),
+    ("delta.enableRowTracking", Some("true"), "rowTracking"),
+    (
+        "delta.enableInCommitTimestamps",
+        Some("true"),
+        "inCommitTimestamp",
+    ),
+    ("delta.checkpointPolicy", Some("v2"), "v2Checkpoint"),
+    ("delta.enableTypeWidening", Some("true"), "typeWidening"),
+];
+
+/// Whether `protocol` has writer feature `feature`: listed, for writer
+/// version 7, or implied by a legacy writer version.
+fn supports(protocol: &Protocol, feature: &str) -> bool {
+    match protocol.min_writer_version() {
+        7 => writer_features(protocol).iter().any(|f| f == feature),
+        v => {
+            let since = match feature {
+                "appendOnly" | "invariants" => 2,
+                "checkConstraints" => 3,
+                "changeDataFeed" | "generatedColumns" => 4,
+                "columnMapping" => 5,
+                "identityColumns" => 6,
+                _ => return false,
+            };
+            v >= since
+        }
+    }
+}
+
+/// Ok unless `metadata`'s properties turn on a feature `protocol` lacks,
+/// e.g. `delta.enableChangeDataFeed=true` on a writer-version-2 table.
+/// Such a table claims a feature no writer maintains: readers that trust
+/// the property (expecting change data files, column-mapped names, ...)
+/// misread it.
+pub fn check_feature_properties(
+    protocol: &Protocol,
+    metadata: &Metadata,
+) -> Result<(), DeltaTxnError> {
+    let config = metadata.configuration();
+    let mut missing = Vec::new();
+    for (key, on_value, feature) in FEATURE_PROPERTIES {
+        let Some(value) = config.get(*key) else {
+            continue;
+        };
+        let enabled = match on_value {
+            Some(on) => value.eq_ignore_ascii_case(on),
+            None => !value.eq_ignore_ascii_case("none"),
+        };
+        if enabled && !supports(protocol, feature) {
+            missing.push(format!("{key}={value} needs the {feature} table feature"));
+        }
+    }
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(DeltaTxnError::NotWritable(format!(
+            "table properties enable features the protocol doesn't have: {}",
+            missing.join("; ")
+        )))
     }
 }
 
@@ -150,6 +224,62 @@ mod tests {
             .to_string();
         assert!(err.contains("notARealFeature, rowTracking"), "{err}");
         assert!(check_writable(&protocol(3, 7, &["columnMapping"], &["columnMapping"])).is_err());
+    }
+
+    fn metadata(config: &[(&str, &str)]) -> Metadata {
+        let config: std::collections::HashMap<_, _> = config.iter().copied().collect();
+        serde_json::from_value(serde_json::json!({
+            "id": "t",
+            "format": {"provider": "parquet", "options": {}},
+            "schemaString": r#"{"type":"struct","fields":[]}"#,
+            "partitionColumns": [],
+            "configuration": config,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn feature_properties_need_their_features() {
+        let v12 = protocol(1, 2, &[], &[]);
+        assert!(check_feature_properties(&v12, &metadata(&[])).is_ok());
+        assert!(check_feature_properties(&v12, &metadata(&[("delta.appendOnly", "true")])).is_ok());
+        assert!(check_feature_properties(
+            &v12,
+            &metadata(&[
+                ("delta.enableChangeDataFeed", "false"),
+                ("delta.columnMapping.mode", "none"),
+                ("delta.checkpointInterval", "10"),
+            ])
+        )
+        .is_ok());
+        let v11 = protocol(1, 1, &[], &[]);
+        assert!(
+            check_feature_properties(&v11, &metadata(&[("delta.appendOnly", "true")])).is_err()
+        );
+
+        let err = check_feature_properties(
+            &v12,
+            &metadata(&[
+                ("delta.enableChangeDataFeed", "TRUE"),
+                ("delta.columnMapping.mode", "name"),
+            ]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("changeDataFeed") && err.contains("columnMapping"),
+            "{err}"
+        );
+
+        let dv = protocol(3, 7, &["deletionVectors"], &["deletionVectors"]);
+        let dv_on = metadata(&[("delta.enableDeletionVectors", "true")]);
+        assert!(check_feature_properties(&dv, &dv_on).is_ok());
+        assert!(check_feature_properties(&v12, &dv_on).is_err());
+        assert!(check_feature_properties(
+            &protocol(1, 4, &[], &[]),
+            &metadata(&[("delta.enableChangeDataFeed", "true")])
+        )
+        .is_ok());
     }
 
     #[test]
