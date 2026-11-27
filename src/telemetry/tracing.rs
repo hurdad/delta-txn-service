@@ -123,12 +123,6 @@ fn build_tracer(
     guard: &mut TelemetryGuard,
 ) -> Option<opentelemetry_sdk::trace::Tracer> {
     let exporter = match protocol {
-        Protocol::Grpc => opentelemetry_otlp::SpanExporter::builder()
-            .with_tonic()
-            .with_protocol(Protocol::Grpc)
-            .build()
-            .map_err(|e| log_exporter_build_error("trace", "grpc", e))
-            .ok(),
         Protocol::HttpBinary => opentelemetry_otlp::SpanExporter::builder()
             .with_http()
             .with_protocol(Protocol::HttpBinary)
@@ -140,6 +134,14 @@ fn build_tracer(
             .with_protocol(Protocol::HttpJson)
             .build()
             .map_err(|e| log_exporter_build_error("trace", "http/json", e))
+            .ok(),
+        // `Protocol` is #[non_exhaustive]; otel_protocol() only ever returns
+        // the three known variants, and gRPC is its default/fallback anyway.
+        _ => opentelemetry_otlp::SpanExporter::builder()
+            .with_tonic()
+            .with_protocol(Protocol::Grpc)
+            .build()
+            .map_err(|e| log_exporter_build_error("trace", "grpc", e))
             .ok(),
     };
 
@@ -163,12 +165,6 @@ fn build_tracer(
 /// (main.rs) needs that to have already happened.
 fn build_meter_provider(protocol: Protocol, resource: Resource) -> Option<SdkMeterProvider> {
     let exporter = match protocol {
-        Protocol::Grpc => opentelemetry_otlp::MetricExporter::builder()
-            .with_tonic()
-            .with_protocol(Protocol::Grpc)
-            .build()
-            .map_err(|e| log_exporter_build_error("metric", "grpc", e))
-            .ok(),
         Protocol::HttpBinary => opentelemetry_otlp::MetricExporter::builder()
             .with_http()
             .with_protocol(Protocol::HttpBinary)
@@ -180,6 +176,14 @@ fn build_meter_provider(protocol: Protocol, resource: Resource) -> Option<SdkMet
             .with_protocol(Protocol::HttpJson)
             .build()
             .map_err(|e| log_exporter_build_error("metric", "http/json", e))
+            .ok(),
+        // `Protocol` is #[non_exhaustive]; otel_protocol() only ever returns
+        // the three known variants, and gRPC is its default/fallback anyway.
+        _ => opentelemetry_otlp::MetricExporter::builder()
+            .with_tonic()
+            .with_protocol(Protocol::Grpc)
+            .build()
+            .map_err(|e| log_exporter_build_error("metric", "grpc", e))
             .ok(),
     };
 
