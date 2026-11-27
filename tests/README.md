@@ -23,9 +23,10 @@ pointed at a real S3-compatible backend.
 ## Layout
 
 - **`common/mod.rs`** — shared harness. `TestServer::start(..)` binds an
-  OS-assigned ephemeral localhost port, runs a real server on it (mirroring
-  main.rs's own service construction, including the `grpc.health.v1.Health`
-  service), and hands out `file://` table URIs under its own tempdir.
+  OS-assigned ephemeral localhost port, runs the server on it through
+  `delta_txn_service::app::serve` (the same function main.rs calls, so
+  layers, auth, health, TLS and limits are the production wiring), and
+  hands out `file://` table URIs under its own tempdir.
   Not itself a test target — see Cargo's own convention that only files
   *directly* under `tests/` are compiled as separate test binaries; a
   `mod.rs` in a subdirectory is just a shared module each test file pulls
@@ -41,6 +42,14 @@ pointed at a real S3-compatible backend.
 - **`e2e_security.rs`** — API-key auth and the `table_uri` allowlist,
   wired end to end.
 - **`e2e_health.rs`** — the `grpc.health.v1.Health` service.
+- **`e2e_server.rs`** — server-level behavior of `app::serve`: TLS and
+  mutual TLS (certificates generated at test time with `rcgen`), startup
+  failure on missing TLS files, graceful shutdown, the storage readiness
+  probe, the request-size limit, and an incoming `traceparent`.
+- **`e2e_binary.rs`** — runs the real `delta-txn-service` executable with
+  a clean environment: env-var config, the fail-closed startup check,
+  JSON logs and OTLP initialization, and SIGTERM graceful shutdown.
+  cargo-llvm-cov collects coverage from the child process too.
 - **`e2e_concurrency.rs`** — many concurrent writers against the same
   table using the documented read-then-commit-with-`expected_version`
   retry pattern, verifying `TableLockManager` and delta-rs's own
@@ -48,7 +57,8 @@ pointed at a real S3-compatible backend.
 - **`e2e_delta_features.rs`** — time travel on the read RPCs,
   `SetTransaction` idempotency (`ALREADY_EXISTS` on a retried txn),
   protocol table features and deletion-vector pass-through, and
-  rejection of file paths that escape the table root.
+  rejection of file paths that escape the table root, and partition
+  values round-tripping through `ListActiveFiles`.
 - **`e2e_s3.rs`** — the same kind of coverage against a real
   S3-compatible backend (SeaweedFS in CI), since `object_store`'s S3 and
   local filesystem backends differ in conditional-put semantics — exactly

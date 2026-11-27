@@ -325,3 +325,86 @@ async fn commit_rejects_file_paths_outside_the_table() {
         assert_eq!(err.code(), Code::InvalidArgument, "{bad:?}: {err:?}");
     }
 }
+
+/// Partition values written on Commit come back from ListActiveFiles as
+/// Delta's string encoding, including for a non-string partition column.
+#[tokio::test]
+async fn partition_values_round_trip_through_list_active_files() {
+    let server = common::TestServer::start(Default::default()).await;
+    let mut client = server.connect().await;
+    let table_uri = server.new_table_uri("partitioned");
+
+    let mut metadata = sample_metadata("partitioned");
+    metadata.schema_string = serde_json::json!({
+        "type": "struct",
+        "fields": [
+            {"name": "id", "type": "long", "nullable": false, "metadata": {}},
+            {"name": "region", "type": "string", "nullable": true, "metadata": {}},
+            {"name": "year", "type": "integer", "nullable": true, "metadata": {}}
+        ]
+    })
+    .to_string();
+    metadata.partition_columns = vec!["region".to_string(), "year".to_string()];
+    client
+        .commit(commit_request(
+            &table_uri,
+            None,
+            vec![
+                pb::Action {
+                    action: Some(pb::action::Action::Protocol(common::sample_protocol())),
+                },
+                pb::Action {
+                    action: Some(pb::action::Action::MetaData(metadata)),
+                },
+            ],
+        ))
+        .await
+        .expect("create partitioned table");
+
+    let partitioned_add = |path: &str, region: &str, year: &str| {
+        let mut action = add_file_action(path, 1);
+        if let Some(pb::action::Action::Add(add)) = action.action.as_mut() {
+            add.partition_values = HashMap::from([
+                ("region".to_string(), region.to_string()),
+                ("year".to_string(), year.to_string()),
+            ]);
+        }
+        action
+    };
+    client
+        .commit(commit_request(
+            &table_uri,
+            Some(0),
+            vec![
+                partitioned_add("region=us/year=2026/a.parquet", "us", "2026"),
+                partitioned_add("region=eu/year=2025/b.parquet", "eu", "2025"),
+            ],
+        ))
+        .await
+        .expect("append partitioned files");
+
+    let (_, files) = list_files(
+        &mut client,
+        pb::ListActiveFilesRequest {
+            table_uri,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let by_path: HashMap<_, _> = files
+        .into_iter()
+        .map(|f| (f.path, f.partition_values))
+        .collect();
+    assert_eq!(
+        by_path["region=us/year=2026/a.parquet"],
+        HashMap::from([
+            ("region".to_string(), "us".to_string()),
+            ("year".to_string(), "2026".to_string()),
+        ])
+    );
+    assert_eq!(
+        by_path["region=eu/year=2025/b.parquet"]["region"],
+        "eu".to_string()
+    );
+}

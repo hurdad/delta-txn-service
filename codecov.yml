@@ -1,0 +1,16 @@
+# Codecov configuration. Coverage is uploaded by .github/workflows/coverage.yml
+# (unit + file://-backed integration tests, including tests/e2e_binary.rs's
+# child processes). tests/e2e_s3.rs no-ops there, so S3-only paths don't count.
+coverage:
+  status:
+    project:
+      default:
+        # Line coverage was ~93% when this was set; fail below 90%.
+        target: 90%
+        threshold: 0.5%
+    patch:
+      default:
+        # New code should be tested, but a small refactor touching an
+        # untestable line shouldn't block anything.
+        target: 80%
+        informational: true
