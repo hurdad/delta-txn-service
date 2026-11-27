@@ -328,7 +328,8 @@ message AddCDCFile {
 
 // Delta `domainMetadata` action: named configuration owned by a feature
 // or system (e.g. "delta.clustering" for liquid clustering). Requires the
-// "domainMetadata" writer feature.
+// "domainMetadata" writer feature, which this service can't write yet, so
+// Commit currently refuses these with FAILED_PRECONDITION.
 message DomainMetadata {
   string domain = 1;
   // Opaque to Delta; conventionally a JSON string.
@@ -354,6 +355,14 @@ message Protocol {
   // is 3, writer_features only when min_writer_version is 7 -- a client
   // must refuse to read or write a table that lists a feature it doesn't
   // implement.
+  //
+  // Commit can only write tables with min_writer_version 1, 2, or 7 with
+  // writer features limited to appendOnly, deletionVectors, timestampNtz,
+  // variantType, variantType-preview, v2Checkpoint and
+  // checkpointProtection (delta-rs's writable set). Creating or upgrading
+  // to any other protocol, or appending to a table that has one, fails with
+  // FAILED_PRECONDITION naming the features. Any table delta-rs can read
+  // can still be read through GetTable/ListActiveFiles.
   repeated string reader_features = 3;
   repeated string writer_features = 4;
 }

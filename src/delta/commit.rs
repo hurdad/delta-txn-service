@@ -150,6 +150,19 @@ fn map_commit_error(e: DeltaTableError) -> DeltaTxnError {
         | DeltaTableError::Transaction {
             source: TransactionError::CommitConflict(_) | TransactionError::MaxCommitAttempts(_),
         } => DeltaTxnError::CommitConflict(e.to_string()),
+        // Raised by delta-rs's own protocol check on append, for tables
+        // created elsewhere (e.g. by Spark) with features this service
+        // can't write; delta::features catches the ones created here.
+        DeltaTableError::Transaction {
+            source:
+                source @ (TransactionError::UnsupportedTableFeatures(_)
+                | TransactionError::TableFeaturesRequired(_)),
+        } => DeltaTxnError::NotWritable(format!("this table can't be written here: {source}")),
+        DeltaTableError::Transaction {
+            source: TransactionError::DeltaTableAppendOnly,
+        } => DeltaTxnError::NotWritable(
+            "the table is append-only: Remove actions with data_change are not allowed".to_string(),
+        ),
         _ => DeltaTxnError::CommitFailed(e.to_string()),
     }
 }

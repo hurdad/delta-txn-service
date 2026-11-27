@@ -23,6 +23,7 @@ use crate::delta::errors::DeltaTxnError;
 use crate::delta::{
     cache::{snapshot_cache_from_env, SnapshotCache},
     commit::{commit_actions, create_table, find_metadata, find_protocol},
+    features,
     table::{open_table_at, table_exists, ReadAt},
 };
 use crate::grpc::mapping::{map_actions, map_active_file_to_pb, map_protocol_to_pb};
@@ -182,6 +183,11 @@ impl DeltaTxnGrpcServer {
             )));
         }
         let actions = map_actions(r.actions).map_err(Status::invalid_argument)?;
+        // A Protocol action (creating a table, or upgrading one) must be
+        // one this service can keep writing to; see delta::features.
+        if let Some(protocol) = find_protocol(&actions) {
+            features::check_writable(protocol).map_err(Status::from)?;
+        }
 
         // Held across the whole exists-check -> open-table -> version-check
         // -> commit sequence below, not just the commit call itself -- see
@@ -232,6 +238,8 @@ impl DeltaTxnGrpcServer {
                 ));
             };
 
+            features::check_domain_metadata(&protocol, &actions).map_err(Status::from)?;
+
             let version = create_table(
                 normalized_table_uri,
                 self.storage_opts.clone(),
@@ -257,6 +265,14 @@ impl DeltaTxnGrpcServer {
             .latest(&normalized_table_uri, self.storage_opts.clone())
             .await
             .map_err(Status::from)?;
+
+        {
+            // The protocol after this commit: its own Protocol action if it
+            // has one, otherwise the table's current one.
+            let current = table.snapshot().map_err(map_open_or_snapshot_error)?;
+            let protocol = find_protocol(&actions).unwrap_or_else(|| current.protocol());
+            features::check_domain_metadata(protocol, &actions).map_err(Status::from)?;
+        }
 
         if let Some(expected) = r.expected_version {
             // delta-rs's DeltaTable::version() returns u64; expected/actual

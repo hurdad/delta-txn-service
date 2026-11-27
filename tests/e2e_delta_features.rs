@@ -495,3 +495,232 @@ async fn commits_write_checkpoints_at_the_table_interval() {
     assert_eq!(count_files(Some(3)).await, 3);
     assert_eq!(count_files(Some(10)).await, 10);
 }
+
+fn create_with_protocol(
+    reader: i32,
+    writer: i32,
+    reader_features: &[&str],
+    writer_features: &[&str],
+) -> Vec<pb::Action> {
+    vec![
+        pb::Action {
+            action: Some(pb::action::Action::Protocol(pb::Protocol {
+                min_reader_version: reader,
+                min_writer_version: writer,
+                reader_features: reader_features.iter().map(|s| s.to_string()).collect(),
+                writer_features: writer_features.iter().map(|s| s.to_string()).collect(),
+            })),
+        },
+        pb::Action {
+            action: Some(pb::action::Action::MetaData(sample_metadata("features"))),
+        },
+    ]
+}
+
+fn domain_metadata(domain: &str) -> pb::Action {
+    pb::Action {
+        action: Some(pb::action::Action::DomainMetadata(pb::DomainMetadata {
+            domain: domain.to_string(),
+            configuration: "{}".to_string(),
+            removed: false,
+        })),
+    }
+}
+
+/// Guards delta::features::WRITABLE_FEATURES against drift on a delta-rs
+/// upgrade: a table with each listed feature can be created *and*
+/// appended to (delta-rs's own check runs on the append), and one with a
+/// feature past the list is refused at create time.
+#[tokio::test]
+async fn every_writable_feature_can_be_created_and_appended_to() {
+    let server = common::TestServer::start(Default::default()).await;
+    let mut client = server.connect().await;
+    for feature in delta_txn_service::delta::features::WRITABLE_FEATURES {
+        // Reader features where Delta requires them on the reader side too.
+        let reader: &[&str] = match *feature {
+            "deletionVectors"
+            | "timestampNtz"
+            | "v2Checkpoint"
+            | "variantType"
+            | "variantType-preview" => &[feature],
+            _ => &[],
+        };
+        let uri = server.new_table_uri(&format!("writable-{feature}"));
+        client
+            .commit(commit_request(
+                &uri,
+                None,
+                create_with_protocol(3, 7, reader, &[feature]),
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("create with {feature}: {e:?}"));
+        client
+            .commit(commit_request(
+                &uri,
+                Some(0),
+                vec![add_file_action("a.parquet", 1)],
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("append with {feature}: {e:?}"));
+    }
+}
+
+#[tokio::test]
+async fn tables_this_service_cannot_write_are_refused_at_create() {
+    let server = common::TestServer::start(Default::default()).await;
+    let mut client = server.connect().await;
+    // (reader version, writer version, reader features, writer features,
+    // expected in the message)
+    type Case<'a> = (i32, i32, &'a [&'a str], &'a [&'a str], &'a str);
+    let cases: &[Case] = &[
+        (1, 3, &[], &[], "writer version 3"),
+        (1, 4, &[], &[], "writer version 4"),
+        (1, 5, &[], &[], "writer version 5"),
+        (2, 5, &[], &[], "ColumnMapping"),
+        (1, 6, &[], &[], "writer version 6"),
+        (
+            1,
+            7,
+            &[],
+            &["rowTracking", "domainMetadata"],
+            "domainMetadata, rowTracking",
+        ),
+        (1, 7, &[], &["inCommitTimestamp"], "inCommitTimestamp"),
+        (1, 7, &[], &["notARealFeature"], "notARealFeature"),
+        (3, 7, &["typeWidening"], &["typeWidening"], "TypeWidening"),
+    ];
+    for (i, (reader, writer, rf, wf, expect)) in cases.iter().enumerate() {
+        let uri = server.new_table_uri(&format!("unwritable-{i}"));
+        let err = client
+            .commit(commit_request(
+                &uri,
+                None,
+                create_with_protocol(*reader, *writer, rf, wf),
+            ))
+            .await
+            .expect_err(expect);
+        assert_eq!(err.code(), Code::FailedPrecondition, "{expect}: {err:?}");
+        assert!(
+            err.message().contains(expect),
+            "{expect}: {}",
+            err.message()
+        );
+        // Nothing was created.
+        let missing = client
+            .get_table(pb::GetTableRequest {
+                table_uri: uri,
+                ..Default::default()
+            })
+            .await
+            .expect_err("no table");
+        assert_eq!(missing.code(), Code::NotFound);
+    }
+}
+
+#[tokio::test]
+async fn a_protocol_upgrade_to_an_unwritable_feature_is_refused() {
+    let server = common::TestServer::start(Default::default()).await;
+    let mut client = server.connect().await;
+    let uri = server.new_table_uri("upgrade");
+    client
+        .commit(commit_request(&uri, None, create_table_actions("upgrade")))
+        .await
+        .unwrap();
+    let upgrade = create_with_protocol(1, 7, &[], &["rowTracking", "domainMetadata"])
+        .into_iter()
+        .take(1)
+        .collect();
+    let err = client
+        .commit(commit_request(&uri, Some(0), upgrade))
+        .await
+        .expect_err("upgrade");
+    assert_eq!(err.code(), Code::FailedPrecondition, "{err:?}");
+    // The table is still writable.
+    client
+        .commit(commit_request(
+            &uri,
+            Some(0),
+            vec![add_file_action("a.parquet", 1)],
+        ))
+        .await
+        .unwrap();
+}
+
+/// Domain metadata needs the domainMetadata writer feature, which this
+/// service can't write, so it's refused on every table it can write.
+#[tokio::test]
+async fn domain_metadata_without_its_feature_is_refused() {
+    let server = common::TestServer::start(Default::default()).await;
+    let mut client = server.connect().await;
+    let uri = server.new_table_uri("domains");
+    let mut create = create_table_actions("domains");
+    create.push(domain_metadata("myapp"));
+    let err = client
+        .commit(commit_request(&uri, None, create))
+        .await
+        .expect_err("create with domain metadata");
+    assert_eq!(err.code(), Code::FailedPrecondition, "{err:?}");
+
+    client
+        .commit(commit_request(&uri, None, create_table_actions("domains")))
+        .await
+        .unwrap();
+    for domain in ["myapp", "delta.rowTracking"] {
+        let err = client
+            .commit(commit_request(&uri, Some(0), vec![domain_metadata(domain)]))
+            .await
+            .expect_err(domain);
+        assert_eq!(err.code(), Code::FailedPrecondition, "{domain}: {err:?}");
+    }
+}
+
+/// A table created by another writer (Spark, say) with a feature this
+/// service can't write: appends get FAILED_PRECONDITION naming the
+/// feature, not INTERNAL.
+#[tokio::test]
+async fn appending_to_a_foreign_unwritable_table_is_a_failed_precondition() {
+    use delta_txn_service::delta::commit::{create_table, find_metadata, find_protocol};
+    use delta_txn_service::grpc::mapping::map_actions;
+
+    let server = common::TestServer::start(Default::default()).await;
+    let mut client = server.connect().await;
+    let uri = server.new_table_uri("foreign");
+    // Created directly with delta-rs, bypassing the service's checks.
+    let actions = map_actions(create_with_protocol(
+        1,
+        7,
+        &[],
+        &["rowTracking", "domainMetadata"],
+    ))
+    .unwrap();
+    let protocol = find_protocol(&actions).unwrap().clone();
+    let metadata = find_metadata(&actions).unwrap().clone();
+    create_table(
+        url::Url::parse(&uri).unwrap(),
+        HashMap::new(),
+        actions,
+        protocol,
+        metadata,
+    )
+    .await
+    .unwrap();
+
+    let err = client
+        .commit(commit_request(
+            &uri,
+            Some(0),
+            vec![add_file_action("a.parquet", 1)],
+        ))
+        .await
+        .expect_err("append");
+    assert_eq!(err.code(), Code::FailedPrecondition, "{err:?}");
+    assert!(err.message().contains("RowTracking"), "{}", err.message());
+    // Reads still work.
+    client
+        .get_table(pb::GetTableRequest {
+            table_uri: uri,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+}

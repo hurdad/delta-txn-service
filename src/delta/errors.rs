@@ -54,6 +54,14 @@ pub enum DeltaTxnError {
     /// landed (or is out of order) and must not be applied again.
     #[error("app_id '{app_id}' already committed transaction version {committed}")]
     TransactionAlreadyCommitted { app_id: String, committed: i64 },
+
+    /// The commit is valid but this table can't take it: a protocol or
+    /// table feature this service can't write (delta::features), domain
+    /// metadata without its feature, or a data-changing Remove on an
+    /// append-only table. FAILED_PRECONDITION; the message names feature
+    /// names only, so it's client-safe.
+    #[error("{0}")]
+    NotWritable(String),
 }
 
 impl From<DeltaTxnError> for tonic::Status {
@@ -86,6 +94,7 @@ impl From<DeltaTxnError> for tonic::Status {
             // ALREADY_EXISTS: the work this commit describes is already in
             // the table. A client retrying after an unknown outcome should
             // treat this as success, not retry again.
+            DeltaTxnError::NotWritable(msg) => tonic::Status::failed_precondition(msg.clone()),
             DeltaTxnError::TransactionAlreadyCommitted { .. } => {
                 tonic::Status::already_exists(err.to_string())
             }
