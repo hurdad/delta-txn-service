@@ -8,7 +8,7 @@ use tonic::body::Body as TonicBody;
 use tonic::codegen::http::{HeaderMap, Request, Response};
 use tower::{Layer, Service};
 use tracing::Instrument;
-use tracing_opentelemetry::OpenTelemetrySpanExt;
+use tracing_opentelemetry::{OpenTelemetrySpanExt, SetParentError};
 
 // Wraps every request in a "grpc.request" tracing span, made a *child* of
 // whatever W3C traceparent/tracestate headers the caller sent (if any) --
@@ -111,13 +111,12 @@ where
             // key's name, when auth is enabled.
             client = tracing::field::Empty,
         );
-        // Errors only when the span was already started/consumed elsewhere
-        // (see OpenTelemetrySpanExt::set_parent's own doc comment) -- can't
-        // happen for a span created fresh right above, but set_parent
-        // still returns a Result rather than panicking, so this has to be
-        // handled either way.
-        if let Err(err) = span.set_parent(parent_cx) {
-            tracing::warn!(error = %err, "failed to set span parent from incoming trace context");
+        // LayerNotFound (OTLP export is off, so there's no OpenTelemetry
+        // layer) and SpanDisabled (the span was filtered out by RUST_LOG)
+        // are normal and happen on every request in those setups. Only
+        // AlreadyStarted would indicate a bug: this span is brand new.
+        if let Err(SetParentError::AlreadyStarted) = span.set_parent(parent_cx) {
+            tracing::warn!("failed to set span parent from incoming trace context");
         }
 
         let mut inner = self.inner.clone();
