@@ -41,7 +41,7 @@ RUN cargo build --release
 # Run tests to validate the build artifacts. Uses the release-test profile
 # (Cargo.toml), not --release directly -- see that profile's comment: fat
 # LTO + codegen-units=1 against test binaries, on top of the
-# deltalake+datafusion dependency graph, is enough peak memory during
+# deltalake/arrow/parquet dependency graph, is enough peak memory during
 # linking to OOM a Docker build.
 RUN cargo test --profile release-test
 

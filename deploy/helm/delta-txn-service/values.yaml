@@ -76,7 +76,7 @@ containerSecurityContext:
       - ALL
 
 # Conservative starting points, not load-tested numbers -- this service's
-# dependency stack (Arrow/DataFusion/Parquet, pulled in transitively by
+# dependency stack (Arrow/Parquet, pulled in transitively by
 # deltalake's own schema-parsing and ListActiveFiles' snapshot/file-listing
 # path) has a materially heavier memory footprint per request than a plain
 # CRUD service, and a big ListActiveFiles response (many thousands of

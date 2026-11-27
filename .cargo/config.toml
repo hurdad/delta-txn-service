@@ -1,0 +1,7 @@
+# Resolve dependencies to versions whose own `rust-version` fits ours
+# (Cargo.toml's `rust-version`), falling back to newer ones only when no
+# compatible version exists. Without this, a plain `cargo update` happily
+# picks crates that need a newer Rust than CI and the Dockerfile pin
+# (e.g. deltalake 1.1.2 needs 1.95), and the build then fails there.
+[resolver]
+incompatible-rust-versions = "fallback"

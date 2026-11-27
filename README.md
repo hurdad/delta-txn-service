@@ -131,7 +131,7 @@ proto/delta_txn.proto
 ## Storage backends
 
 Supported via [`delta-rs`](https://github.com/delta-io/delta-rs) — currently the
-`deltalake` crate **0.32.4** (see `Cargo.toml`; keep this line in sync when bumping it):
+`deltalake` crate **1.1.1** (see `Cargo.toml`; keep this line in sync when bumping it):
 - Amazon S3
 - MinIO
 - Local filesystem (`file:///`)
