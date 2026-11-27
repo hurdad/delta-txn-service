@@ -19,7 +19,7 @@ updates:
     schedule:
       interval: "weekly"
 
-  # Dockerfile's own base images (rust:1.94-trixie, debian:trixie-slim).
+  # Dockerfile's own base images (rust:1.94.1-trixie, debian:trixie-slim).
   - package-ecosystem: "docker"
     directory: "/"
     schedule:

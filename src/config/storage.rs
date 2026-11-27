@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
 /// Load object-store configuration from environment variables.
-/// Works for S3, MinIO, local FS.
+/// Works for S3, S3-compatible stores, local FS.
 ///
 /// Every `AWS_*` env var is forwarded verbatim (AWS_ACCESS_KEY_ID,
-/// AWS_SECRET_ACCESS_KEY, AWS_ENDPOINT_URL for MinIO/S3-compatible
+/// AWS_SECRET_ACCESS_KEY, AWS_ENDPOINT_URL for S3-compatible
 /// storage, AWS_REGION, etc.) -- object_store/deltalake's own
 /// storage-options parsing picks the ones it recognizes and ignores the
 /// rest, so this deliberately doesn't maintain its own allowlist of

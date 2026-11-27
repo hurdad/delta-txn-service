@@ -76,7 +76,7 @@ Writer (Spark / Arrow / etc)         Reader (query engine / client)
    _delta_log/*.json  ------------------------+
         |
         v
-   Object Storage (S3 / MinIO / FS)
+   Object Storage (S3 / S3-compatible / FS)
 ```
 
 The read path (`GetTable`, `ListActiveFiles`) never blocks on or serializes
@@ -148,15 +148,16 @@ proto/delta_txn.proto
 Supported via [`delta-rs`](https://github.com/delta-io/delta-rs) — currently the
 `deltalake` crate **1.1.1** (see `Cargo.toml`; keep this line in sync when bumping it):
 - Amazon S3
-- MinIO
+- S3-compatible stores that support conditional writes (`If-None-Match` on PutObject), which
+  delta-rs's S3 commit protocol relies on. Tested in CI against SeaweedFS.
 - Local filesystem (`file:///`)
 
-Configuration is driven by environment variables (example for MinIO):
+Configuration is driven by environment variables (example for a local SeaweedFS S3 gateway):
 
 ```bash
-AWS_ENDPOINT_URL=http://minio:9000
-AWS_ACCESS_KEY_ID=minioadmin
-AWS_SECRET_ACCESS_KEY=minioadmin
+AWS_ENDPOINT_URL=http://seaweedfs:8333
+AWS_ACCESS_KEY_ID=dev
+AWS_SECRET_ACCESS_KEY=dev
 AWS_REGION=us-east-1
 AWS_ALLOW_HTTP=true
 ```

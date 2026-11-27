@@ -11,8 +11,8 @@ name: Coverage
 # Runs the unit tests (src/) and the file://-backed integration suite
 # (tests/) under cargo-llvm-cov, via cargo-nextest so the same run also
 # emits JUnit XML for Codecov Test Analytics (.config/nextest.toml's `ci`
-# profile). tests/e2e_minio.rs no-ops here (no MinIO; ci.yml's
-# minio-integration-tests job covers it), so S3-specific paths aren't
+# profile). tests/e2e_s3.rs no-ops here (no S3 endpoint; ci.yml's
+# s3-integration-tests job covers it), so S3-specific paths aren't
 # counted -- the commit/conflict logic they exercise is the same code the
 # file:// suite already covers.
 on:
@@ -32,31 +32,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.94.1
+        uses: dtolnay/rust-toolchain@2d81d658c8c4093152107cdb91c1e9545a9f992c # 1.94.1
         with:
+          toolchain: 1.94.1
           components: llvm-tools-preview
 
       - name: Install cargo-llvm-cov and cargo-nextest
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@073e1fd0bc889c9aee68dbaaa927cde1b5653a83 # v2
         with:
           tool: cargo-llvm-cov,cargo-nextest
 
       - name: Cache cargo registry and build artifacts
-        uses: Swatinem/rust-cache@v2
-
-      # Same native deps as ci.yml's minio-integration-tests job / the
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      # Same native deps as ci.yml's s3-integration-tests job / the
       # Dockerfile's builder stage.
       - name: Install native build dependencies
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler pkg-config libssl-dev
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler
 
       - name: Run tests with coverage
         run: cargo llvm-cov nextest --profile ci --locked --codecov --output-path codecov.json
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: codecov.json
@@ -66,7 +65,7 @@ jobs:
       # the results worth reporting.
       - name: Upload test results to Codecov
         if: ${{ !cancelled() }}
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           report_type: test_results

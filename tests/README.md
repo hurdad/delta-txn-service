@@ -16,8 +16,8 @@ Both suites (unit + integration) run together; Cargo treats every file
 directly under `tests/` as its own test binary. No external services are
 required — each test gets its own throwaway `file://` Delta table under a
 fresh `tempdir`, so this runs anywhere, including inside the Docker build's
-`RUN cargo test --profile release-test` step, with no S3/MinIO dependency.
-The one exception is `e2e_minio.rs` (below), which skips itself unless
+`RUN cargo test --profile release-test` step, with no S3 dependency.
+The one exception is `e2e_s3.rs` (below), which skips itself unless
 pointed at a real S3-compatible backend.
 
 ## Layout
@@ -49,12 +49,22 @@ pointed at a real S3-compatible backend.
   `SetTransaction` idempotency (`ALREADY_EXISTS` on a retried txn),
   protocol table features and deletion-vector pass-through, and
   rejection of file paths that escape the table root.
-- **`e2e_minio.rs`** — the same kind of coverage against a real
-  S3-compatible backend (MinIO), since `object_store`'s S3 and local
-  filesystem backends differ in conditional-put semantics — exactly what
-  conflict detection depends on. A no-op unless `AWS_ENDPOINT_URL` and
-  `DELTA_TXN_TEST_S3_BUCKET` are set; CI's `minio-integration-tests` job
-  sets them. Run it with `cargo test --test e2e_minio`.
+- **`e2e_s3.rs`** — the same kind of coverage against a real
+  S3-compatible backend (SeaweedFS in CI), since `object_store`'s S3 and
+  local filesystem backends differ in conditional-put semantics — exactly
+  what conflict detection depends on. Includes two server replicas racing
+  on one table, which only the backend's conditional put can arbitrate.
+  A no-op unless `AWS_ENDPOINT_URL` and `DELTA_TXN_TEST_S3_BUCKET` are
+  set; CI's `s3-integration-tests` job sets them. To run it locally:
+
+  ```bash
+  docker run -d --name seaweedfs -p 8333:8333 chrislusf/seaweedfs:4.55 server -s3 -dir=/data
+  AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test \
+    aws --endpoint-url http://localhost:8333 --region us-east-1 s3 mb s3://delta-txn-service-ci
+  AWS_ENDPOINT_URL=http://localhost:8333 AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test \
+    AWS_REGION=us-east-1 AWS_ALLOW_HTTP=true DELTA_TXN_TEST_S3_BUCKET=delta-txn-service-ci \
+    cargo test --test e2e_s3
+  ```
 
 ## Why this suite exists
 

@@ -11,15 +11,15 @@ A native Rust + gRPC transaction coordinator for Delta Lake: it owns `_delta_log
 ```bash
 cargo build --release          # build
 cargo test                     # unit tests (src/) + integration tests (tests/), file://-backed
-cargo test --test e2e_minio    # the one integration suite gated on real MinIO env vars (see below); a no-op skip without them
+cargo test --test e2e_s3       # the one integration suite gated on a real S3 endpoint (SeaweedFS in CI, see below); a no-op skip without it
 cargo test <substring>         # run tests whose name contains <substring>, across all binaries
 cargo run                      # run locally; needs DELTA_TXN_GRPC_ADDR etc., see README's Configuration section
 
 docker build -t delta-txn-service .                              # full multi-stage build (also runs cargo test --profile release-test)
-docker compose -f deploy/docker-compose.yaml up -d --build        # local dev stack: service + MinIO
+docker compose -f deploy/docker-compose.yaml up -d --build        # local dev stack: service + SeaweedFS
 ```
 
-Formatting is enforced: `rustfmt.toml` pins `edition`, and `.github/workflows/ci.yml`'s `fmt` job runs `cargo fmt --all -- --check` on every PR — run `cargo fmt --all` before committing. Clippy is not configured or run in CI.
+Formatting is enforced: `rustfmt.toml` pins `edition`, and `.github/workflows/ci.yml`'s `fmt` job runs `cargo fmt --all -- --check` on every PR — run `cargo fmt --all` before committing. CI also runs `cargo clippy --all-targets --locked -- -D warnings` (`clippy` job), `cargo audit` (`audit` job; justified ignores live in `.cargo/audit.toml`, each with its removal condition), and `helm lint`/`helm template` on the chart (`helm` job, which also asserts the default no-auth render is refused).
 
 **Docker build must include `tests/`.** The Dockerfile's builder stage explicitly `COPY`s `build.rs`, `proto/`, `src/`, and `tests/` before running `cargo build`/`cargo test` — if you ever restructure the Dockerfile, dropping the `tests/` copy makes `cargo test --profile release-test` silently run zero integration tests (no error, no output about them, `tests/` just doesn't exist in that build context). This already happened once; it's why that `COPY` line has a comment on it.
 
@@ -48,7 +48,7 @@ Once against the *raw* client-supplied string, once against the *normalized* one
 
 ### Health status: liveness vs. readiness are deliberately different signals
 
-The overall-server (`""`) status only ever reflects "process is alive and serving gRPC" — the Helm chart's *liveness* probe checks this, unconditionally `SERVING` from startup. The `delta.txn.v1.DeltaTxnService`-specific status is what the *readiness* probe checks, and — only when `AWS_ENDPOINT_URL` is configured (the self-hosted/MinIO-style deployment shape, where there's one fixed endpoint to probe; real AWS S3 has no such single fixed thing to check) — `main.rs`'s `spawn_storage_health_probe` periodically reflects real reachability into it. Storage being down should pull the pod out of Service endpoints (readiness), not restart it (liveness would do that, and restarting doesn't fix a downstream outage).
+The overall-server (`""`) status only ever reflects "process is alive and serving gRPC" — the Helm chart's *liveness* probe checks this, unconditionally `SERVING` from startup. The `delta.txn.v1.DeltaTxnService`-specific status is what the *readiness* probe checks, and — only when `AWS_ENDPOINT_URL` is configured (the self-hosted S3-compatible deployment shape, where there's one fixed endpoint to probe; real AWS S3 has no such single fixed thing to check) — `main.rs`'s `spawn_storage_health_probe` periodically reflects real reachability into it. Storage being down should pull the pod out of Service endpoints (readiness), not restart it (liveness would do that, and restarting doesn't fix a downstream outage).
 
 ### Config loading
 
@@ -56,8 +56,8 @@ The overall-server (`""`) status only ever reflects "process is alive and servin
 
 ### Testing
 
-Unit tests are colocated (`#[cfg(test)] mod tests` in the same file as the code they test) throughout `src/` — pure functions and in-memory `kernel::Action` values only, no real storage I/O. The integration suite lives in `tests/` (see `tests/README.md`): `tests/common/mod.rs` spins up a real `DeltaTxnGrpcServer` on an ephemeral localhost port with a real generated gRPC client (`build.rs` generates both server *and* client stubs — the client exists specifically for this suite, and for any downstream Rust consumer of this crate as a library). Every test file except `tests/e2e_minio.rs` uses a `file://` tempdir backend (no external dependency, runs anywhere `cargo test` does). `tests/e2e_minio.rs` runs the same kind of coverage against a real S3-compatible backend (MinIO) specifically because `object_store`'s backends don't share identical semantics — conditional-put behavior in particular, which is exactly what this service's optimistic-concurrency conflict detection depends on; it silently no-ops unless `AWS_ENDPOINT_URL`/`DELTA_TXN_TEST_S3_BUCKET` are set, which only `.github/workflows/ci.yml`'s `minio-integration-tests` job does.
+Unit tests are colocated (`#[cfg(test)] mod tests` in the same file as the code they test) throughout `src/` — pure functions and in-memory `kernel::Action` values only, no real storage I/O. The integration suite lives in `tests/` (see `tests/README.md`): `tests/common/mod.rs` spins up a real `DeltaTxnGrpcServer` on an ephemeral localhost port with a real generated gRPC client (`build.rs` generates both server *and* client stubs — the client exists specifically for this suite, and for any downstream Rust consumer of this crate as a library). Every test file except `tests/e2e_s3.rs` uses a `file://` tempdir backend (no external dependency, runs anywhere `cargo test` does). `tests/e2e_s3.rs` runs the same kind of coverage against a real S3-compatible backend (SeaweedFS in CI; MinIO was dropped as its community edition is no longer maintained) specifically because `object_store`'s backends don't share identical semantics — conditional-put behavior in particular, which is exactly what this service's optimistic-concurrency conflict detection depends on; it silently no-ops unless `AWS_ENDPOINT_URL`/`DELTA_TXN_TEST_S3_BUCKET` are set, which only `.github/workflows/ci.yml`'s `s3-integration-tests` job does. Any S3-compatible backend used here must support conditional writes (`If-None-Match` on PutObject). It includes a two-replica race test (two servers, separate in-process locks), the only test where storage-level conflicts actually occur; delta-rs reports those as `VersionAlreadyExists`/`CommitConflict`/`MaxCommitAttempts`, which `delta::commit::map_commit_error` turns into `ABORTED`.
 
 ### Deployment
 
-`deploy/docker-compose.yaml` — local dev, service + MinIO, not production-safe (hardcoded credentials, no TLS). `deploy/helm/delta-txn-service/` — the production path; see `deploy/README.md` and `values.yaml`'s own inline comments (most values map 1:1 onto the env vars in the root README's Configuration section).
+`deploy/docker-compose.yaml` — local dev, service + SeaweedFS, not production-safe (no S3 auth, no TLS, `DELTA_TXN_ALLOW_INSECURE=true`). `deploy/helm/delta-txn-service/` — the production path; see `deploy/README.md` and `values.yaml`'s own inline comments (most values map 1:1 onto the env vars in the root README's Configuration section).

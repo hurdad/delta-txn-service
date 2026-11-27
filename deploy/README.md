@@ -5,7 +5,7 @@ pick whichever matches what you're doing:
 
 ## `docker-compose.yaml` — local development
 
-Runs the service alongside a local MinIO instance (S3-compatible storage),
+Runs the service alongside a local SeaweedFS instance (S3-compatible storage),
 built from this repo's own `Dockerfile`. This is what to reach for when
 iterating locally against a real object-store backend rather than the
 `file://` filesystem backend the integration test suite (`tests/`) uses.
@@ -15,17 +15,18 @@ docker compose -f deploy/docker-compose.yaml up -d --build
 ```
 
 - `delta-txn-service` listens on `localhost:50051`.
-- MinIO's S3 API is on `localhost:9000`; its web console is on
-  `localhost:9001` (`minioadmin` / `minioadmin`, matching the credentials
-  baked into the compose file's own `AWS_*` env vars).
-- MinIO starts with **no buckets** — create one before pointing a
+- SeaweedFS's S3 API is on `localhost:8333`. It has no S3 identities
+  configured, so it accepts any credentials (the compose file uses
+  `dev` / `dev`).
+- SeaweedFS starts with **no buckets** — create one before pointing a
   `table_uri` at it, e.g.:
   ```bash
-  aws --endpoint-url http://localhost:9000 s3 mb s3://your-bucket
+  AWS_ACCESS_KEY_ID=dev AWS_SECRET_ACCESS_KEY=dev \
+    aws --endpoint-url http://localhost:8333 --region us-east-1 s3 mb s3://your-bucket
   ```
 
-Not meant for production use as-is — credentials are hardcoded, there's no
-TLS, and MinIO's single-node mode has no durability guarantees.
+Not meant for production use as-is — there's no S3 authentication or
+TLS, and the single-process SeaweedFS has no replication.
 
 ## `helm/delta-txn-service/` — Kubernetes
 

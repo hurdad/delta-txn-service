@@ -2,7 +2,7 @@
 //! `DeltaTxnGrpcServer` (mirroring main.rs's own service construction,
 //! including the grpc.health.v1.Health service) bound to an OS-assigned
 //! ephemeral localhost port, and hands out throwaway `file://` table_uris
-//! under a fresh tempdir per server -- no S3/MinIO dependency, so this
+//! under a fresh tempdir per server -- no S3 dependency, so this
 //! suite runs anywhere `cargo test` does, including inside the Docker
 //! build (see Dockerfile's own `RUN cargo test --release` step).
 //!
@@ -49,8 +49,8 @@ pub struct TestServerConfig {
     pub allowed_table_prefixes: Option<Vec<String>>,
     /// Forwarded to `DeltaTxnGrpcServer::with_config` verbatim -- empty by
     /// default, which is all every `file://`-backed test (the overwhelming
-    /// majority of this suite) needs. Only `tests/e2e_minio.rs` sets this,
-    /// to supply `AWS_ENDPOINT_URL`/credentials for a real MinIO backend.
+    /// majority of this suite) needs. Only `tests/e2e_s3.rs` sets this,
+    /// to supply `AWS_ENDPOINT_URL`/credentials for a real S3 backend.
     pub storage_opts: HashMap<String, String>,
     /// Overrides DEFAULT_MAX_ACTIONS_PER_COMMIT when set.
     pub max_actions_per_commit: Option<usize>,

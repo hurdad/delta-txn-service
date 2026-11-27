@@ -81,6 +81,9 @@ pub struct DeltaTxnGrpcServer {
 impl DeltaTxnGrpcServer {
     /// Reads DELTA_TXN_ALLOWED_TABLE_PREFIXES/AWS_* from the environment
     /// once (see config::storage) -- called exactly once in main.rs.
+    // No Default impl on purpose: a Default that silently reads env vars
+    // would be surprising. Use with_config for explicit configuration.
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         let allowed_table_prefixes = load_allowed_table_prefixes();
         if allowed_table_prefixes.is_none() {
@@ -276,9 +279,7 @@ impl DeltaTxnGrpcServer {
             }
         }
 
-        let version = commit_actions(table, actions)
-            .await
-            .map_err(|e| Status::from(e))?;
+        let version = commit_actions(table, actions).await.map_err(Status::from)?;
 
         Ok((
             CommitResponse {

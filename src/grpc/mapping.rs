@@ -866,11 +866,8 @@ mod tests {
 
     #[test]
     fn map_data_change_maps_valid_values() {
-        assert_eq!(map_data_change(pb::DataChange::True as i32).unwrap(), true);
-        assert_eq!(
-            map_data_change(pb::DataChange::False as i32).unwrap(),
-            false
-        );
+        assert!(map_data_change(pb::DataChange::True as i32).unwrap());
+        assert!(!map_data_change(pb::DataChange::False as i32).unwrap());
     }
 
     #[test]

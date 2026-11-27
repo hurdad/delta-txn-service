@@ -34,6 +34,12 @@ pub enum DeltaTxnError {
     #[error("Version conflict: expected {expected}, found {actual}")]
     VersionConflict { expected: i64, actual: i64 },
 
+    /// Another writer's commit won the race at the storage level (see
+    /// delta::commit::map_commit_error). Logged in full; the client gets a
+    /// generic ABORTED so it re-reads and retries.
+    #[error("Concurrent commit conflict: {0}")]
+    CommitConflict(String),
+
     /// A time-travel read (GetTable/ListActiveFiles `version` or
     /// `timestamp_ms`) asked for a version that doesn't exist: newer than
     /// the latest, older than the oldest the log still holds, or a
@@ -73,6 +79,10 @@ impl From<DeltaTxnError> for tonic::Status {
             // errors' real detail is observable at all, so losing it here
             // means losing it entirely -- log before converting, not after.
             DeltaTxnError::VersionNotFound(msg) => tonic::Status::not_found(msg.clone()),
+            DeltaTxnError::CommitConflict(_) => {
+                tracing::info!(error = %err, "commit lost a race to a concurrent writer");
+                tonic::Status::aborted("concurrent commit conflict: re-read the table and retry")
+            }
             // ALREADY_EXISTS: the work this commit describes is already in
             // the table. A client retrying after an unknown outcome should
             // treat this as success, not retry again.

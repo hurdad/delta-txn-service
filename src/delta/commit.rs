@@ -1,8 +1,9 @@
 use super::errors::DeltaTxnError;
+use deltalake::kernel::transaction::TransactionError;
 use deltalake::kernel::transaction::{CommitBuilder, TableReference};
 use deltalake::kernel::{Action, CommitInfo, Metadata, Protocol};
 use deltalake::protocol::{DeltaOperation, SaveMode};
-use deltalake::DeltaTableBuilder;
+use deltalake::{DeltaTableBuilder, DeltaTableError};
 use std::collections::HashMap;
 use url::Url;
 
@@ -136,6 +137,22 @@ fn build_operation(actions: &[Action]) -> DeltaOperation {
     }
 }
 
+/// Classifies a CommitBuilder failure. A concurrent commit from another
+/// writer (another replica, or a writer outside this service) that won the
+/// race shows up as VersionAlreadyExists, a CommitConflict from delta-rs's
+/// conflict checker, or MaxCommitAttempts once its own retries run out.
+/// Those are races the client should retry after re-reading the table, so
+/// they become CommitConflict (gRPC ABORTED), not an opaque INTERNAL.
+fn map_commit_error(e: DeltaTableError) -> DeltaTxnError {
+    match &e {
+        DeltaTableError::VersionAlreadyExists(_)
+        | DeltaTableError::Transaction {
+            source: TransactionError::CommitConflict(_) | TransactionError::MaxCommitAttempts(_),
+        } => DeltaTxnError::CommitConflict(e.to_string()),
+        _ => DeltaTxnError::CommitFailed(e.to_string()),
+    }
+}
+
 /// Commits `actions` to `table` via delta-rs's own `CommitBuilder`, which
 /// handles the actual atomic-log-write protocol (conditional-put on the
 /// next `_delta_log/N.json`, retried against a fresh snapshot on a losing
@@ -162,7 +179,7 @@ pub async fn commit_actions(
             operation,
         )
         .await
-        .map_err(|e| DeltaTxnError::CommitFailed(e.to_string()))?;
+        .map_err(map_commit_error)?;
 
     Ok(result.version() as i64)
 }
@@ -232,7 +249,7 @@ pub async fn create_table(
         .with_actions(actions)
         .build(None, table.log_store(), operation)
         .await
-        .map_err(|e| DeltaTxnError::CommitFailed(e.to_string()))?;
+        .map_err(map_commit_error)?;
 
     let version = result.version() as i64;
     if version != 0 {

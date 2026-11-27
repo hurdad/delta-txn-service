@@ -72,7 +72,7 @@ async fn shutdown_signal(health_reporter: tonic_health::server::HealthReporter) 
         .await;
 }
 
-/// If `AWS_ENDPOINT_URL` is set -- the self-hosted/MinIO-style deployment
+/// If `AWS_ENDPOINT_URL` is set -- the self-hosted S3-compatible deployment
 /// shape, where every `table_uri` this service ever opens ultimately
 /// routes through one fixed object-store endpoint -- spawns a background
 /// task that periodically probes that endpoint's TCP reachability and
@@ -86,7 +86,7 @@ async fn shutdown_signal(health_reporter: tonic_health::server::HealthReporter) 
 /// Deliberately only ever updates `DeltaTxnService`'s own status, never the
 /// overall-server (`""`) status the *liveness* probe checks: a downstream
 /// storage outage isn't a reason to *restart* this process -- restarting
-/// doesn't fix MinIO being down, and cycling pods repeatedly during an
+/// doesn't fix the object store being down, and cycling pods repeatedly during an
 /// outage is its own antipattern -- it's a reason to stop routing *new*
 /// traffic here until it recovers, which is exactly what failing
 /// *readiness* (pulling the pod out of Service endpoints, no restart) does.

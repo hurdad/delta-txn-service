@@ -80,7 +80,7 @@ tonic-prost-build = "0.14.3"
 
 [dev-dependencies]
 # tests/ (the gRPC integration test suite) creates each test's Delta table
-# under a throwaway `file://` tempdir -- no S3/MinIO dependency, so the
+# under a throwaway `file://` tempdir -- no S3 dependency, so the
 # suite runs anywhere `cargo test` does, including the Docker build's own
 # `RUN cargo test --release` step.
 tempfile = "3.27.0"

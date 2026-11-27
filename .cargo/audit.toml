@@ -1,0 +1,15 @@
+# cargo-audit configuration (CI's `audit` job in .github/workflows/ci.yml).
+# Every ignore needs a reason and a condition for removing it.
+
+[advisories]
+ignore = [
+  # quick-xml 0.39.x (RUSTSEC-2026-0194 quadratic duplicate-attribute
+  # check, RUSTSEC-2026-0195 unbounded namespace allocation in NsReader).
+  # Reached only via object_store 0.13's S3 client, which parses XML
+  # responses from the S3 endpoint this service is configured to trust; an
+  # attacker would need to control that storage endpoint. No fixed version
+  # is reachable: object_store 0.13 requires quick-xml 0.39. Remove once
+  # deltalake moves to object_store 0.14+.
+  "RUSTSEC-2026-0194",
+  "RUSTSEC-2026-0195",
+]
