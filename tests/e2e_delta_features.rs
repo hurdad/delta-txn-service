@@ -7,7 +7,9 @@ mod common;
 
 use std::collections::HashMap;
 
-use common::{add_file_action, commit_request, create_table_actions, pb, sample_metadata};
+use common::{
+    add_file_action, commit_request, create_table_actions, pb, sample_metadata, sample_protocol,
+};
 use tokio_stream::StreamExt;
 use tonic::Code;
 
@@ -407,4 +409,89 @@ async fn partition_values_round_trip_through_list_active_files() {
         by_path["region=eu/year=2025/b.parquet"]["region"],
         "eu".to_string()
     );
+}
+
+/// Commits write a checkpoint every `delta.checkpointInterval` versions
+/// (delta-rs 1.1 doesn't by default), and the table reads correctly from
+/// it: latest state and time travel to before the checkpoint.
+#[tokio::test]
+async fn commits_write_checkpoints_at_the_table_interval() {
+    let server = common::TestServer::start(Default::default()).await;
+    let mut client = server.connect().await;
+    let uri = server.new_table_uri("checkpointed");
+
+    let mut metadata = sample_metadata("checkpointed");
+    metadata
+        .configuration
+        .insert("delta.checkpointInterval".to_string(), "5".to_string());
+    let create = vec![
+        pb::Action {
+            action: Some(pb::action::Action::Protocol(sample_protocol())),
+        },
+        pb::Action {
+            action: Some(pb::action::Action::MetaData(metadata)),
+        },
+    ];
+    client
+        .commit(commit_request(&uri, None, create))
+        .await
+        .unwrap();
+    for v in 0..12 {
+        client
+            .commit(commit_request(
+                &uri,
+                Some(v),
+                vec![add_file_action(&format!("f{v}.parquet"), 1)],
+            ))
+            .await
+            .unwrap();
+    }
+
+    let log_dir = url::Url::parse(&uri)
+        .unwrap()
+        .to_file_path()
+        .unwrap()
+        .join("_delta_log");
+    let mut checkpoints: Vec<String> = std::fs::read_dir(&log_dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| n.contains(".checkpoint."))
+        .collect();
+    checkpoints.sort();
+    assert_eq!(
+        checkpoints,
+        vec![
+            "00000000000000000005.checkpoint.parquet",
+            "00000000000000000010.checkpoint.parquet"
+        ]
+    );
+    assert!(log_dir.join("_last_checkpoint").exists());
+
+    let count_files = |version: Option<i64>| {
+        let mut client = client.clone();
+        let uri = uri.clone();
+        async move {
+            let mut stream = client
+                .list_active_files(pb::ListActiveFilesRequest {
+                    table_uri: uri,
+                    version,
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+                .into_inner();
+            let mut n = 0;
+            while let Some(msg) = stream.next().await {
+                if let Some(pb::list_active_files_response::Payload::Batch(b)) =
+                    msg.unwrap().payload
+                {
+                    n += b.files.len();
+                }
+            }
+            n
+        }
+    };
+    assert_eq!(count_files(None).await, 12);
+    assert_eq!(count_files(Some(3)).await, 3);
+    assert_eq!(count_files(Some(10)).await, 10);
 }

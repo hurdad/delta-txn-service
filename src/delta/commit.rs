@@ -3,6 +3,7 @@ use deltalake::kernel::transaction::TransactionError;
 use deltalake::kernel::transaction::{CommitBuilder, TableReference};
 use deltalake::kernel::{Action, CommitInfo, Metadata, Protocol};
 use deltalake::protocol::{DeltaOperation, SaveMode};
+use deltalake::table::config::TablePropertiesExt;
 use deltalake::{DeltaTableBuilder, DeltaTableError};
 use std::collections::HashMap;
 use url::Url;
@@ -171,6 +172,8 @@ pub async fn commit_actions(
         .map_err(|e| DeltaTxnError::CommitFailed(e.to_string()))?;
     let operation = build_operation(&actions);
 
+    let interval = table_state.table_config().checkpoint_interval().get();
+
     let result = CommitBuilder::default()
         .with_actions(actions)
         .build(
@@ -180,8 +183,36 @@ pub async fn commit_actions(
         )
         .await
         .map_err(map_commit_error)?;
+    let version = result.version();
 
-    Ok(result.version() as i64)
+    if version % interval == 0 {
+        checkpoint_after_commit(table, version).await;
+    }
+    Ok(version as i64)
+}
+
+/// Writes the checkpoint for `version` (Delta's `checkpointInterval`,
+/// default every 100 commits). Without checkpoints every full load
+/// replays the whole log, so load time grows with the table's age.
+///
+/// Not through CommitBuilder's post-commit hook: delta-rs 1.1 only
+/// checkpoints when post-commit properties are passed, and it reports a
+/// checkpoint failure as the commit's own error -- after the commit has
+/// landed, so a client would see a failure for a committed version and
+/// might retry it. Here a failure is only logged; the next interval (or
+/// any other writer) checkpoints instead, and readers are unaffected.
+async fn checkpoint_after_commit(mut table: deltalake::DeltaTable, version: u64) {
+    let result = async {
+        table.update_incremental(Some(version)).await?;
+        deltalake::checkpoints::create_checkpoint(&table, None).await
+    }
+    .await;
+    match result {
+        Ok(()) => tracing::debug!(version, "checkpoint written"),
+        Err(e) => {
+            tracing::warn!(error = %e, version, "checkpoint failed; the commit itself succeeded")
+        }
+    }
 }
 
 /// Bootstraps a brand-new Delta table at `table_url` by committing
