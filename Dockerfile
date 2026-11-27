@@ -27,8 +27,13 @@ RUN uname -m > /tmp/arch \
     && echo "$(cat /tmp/arch)-unknown-linux-musl" > /build/.target \
     && rustup target add "$(cat /build/.target)"
 
-# Pre-build dependency layer for caching
+# Pre-build dependency layer for caching. The dummy main uses none of the
+# dependencies, so cargo's unused_dependencies lint (Rust 1.100+) would
+# warn about every one of them; it's allowed for these cache steps only, and
+# the real Cargo.toml is restored below before the real build.
 COPY Cargo.toml Cargo.lock ./
+COPY .cargo/config.toml ./.cargo/config.toml
+RUN printf '\n[lints.cargo]\nunused_dependencies = "allow"\n' >> Cargo.toml
 RUN mkdir src && echo "fn main() {}" > src/main.rs
 RUN cargo build --release --locked --target "$(cat .target)"
 # Warms the release-test-profile dependency build too (see Cargo.toml's
@@ -38,7 +43,8 @@ RUN cargo build --release --locked --target "$(cat .target)"
 RUN cargo test --profile release-test --locked --target "$(cat .target)" --no-run
 RUN rm -rf src
 
-# Copy real source
+# Copy real source (and the unmodified manifest)
+COPY Cargo.toml ./
 COPY build.rs .
 COPY proto ./proto
 COPY src ./src

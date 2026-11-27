@@ -5,3 +5,10 @@
 # (e.g. deltalake 1.1.2 needed 1.95 while we were on 1.94.1), and the build then fails there.
 [resolver]
 incompatible-rust-versions = "fallback"
+
+# Don't print the future-incompatibility notice on every build. It's for
+# proc-macro-error2, pulled in by delta-rs (deltalake-core -> validator ->
+# validator_derive), not this crate, and is tracked in the audit. Check it
+# with `cargo report future-incompatibilities` when bumping the toolchain.
+[future-incompat-report]
+frequency = "never"
