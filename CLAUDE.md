@@ -62,4 +62,9 @@ Unit tests are colocated (`#[cfg(test)] mod tests` in the same file as the code 
 
 ### Deployment
 
+The Docker image is a **fully static musl binary on `gcr.io/distroless/static-debian13`** (no libc, no shell; it had zero known CVEs when adopted, versus ~220 on `debian:trixie-slim`). The builder fails if the binary isn't static. musl builds use mimalloc as the global allocator (`main.rs`, gated on `target_env = "musl"`) because musl's malloc is slow under concurrency; local glibc builds are unaffected. Adding a dependency that needs a system library at runtime would break this image. CI's `image-scan` job runs Trivy (pinned container image, not a GitHub Action) and fails on fixable CRITICAL/HIGH CVEs.
+
+The Rust toolchain (1.100.0) is pinned in five places that must move together: `rust-toolchain.toml`, `Cargo.toml` `rust-version`, the `dtolnay/rust-toolchain` steps and their `toolchain:` inputs in the workflows, and the Dockerfile's `rust:` tag. `.cargo/config.toml`'s MSRV-fallback resolver keeps `cargo update` from picking crates that need a newer Rust.
+
+
 `deploy/docker-compose.yaml` — local dev, service + SeaweedFS, not production-safe (no S3 auth, no TLS, `DELTA_TXN_ALLOW_INSECURE=true`). `deploy/helm/delta-txn-service/` — the production path; see `deploy/README.md` and `values.yaml`'s own inline comments (most values map 1:1 onto the env vars in the root README's Configuration section).
