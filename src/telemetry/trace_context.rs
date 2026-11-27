@@ -107,6 +107,9 @@ where
             "rpc.system" = "grpc",
             "rpc.service" = %service,
             "rpc.method" = %method,
+            // Filled in by grpc::auth's interceptor with the matched API
+            // key's name, when auth is enabled.
+            client = tracing::field::Empty,
         );
         // Errors only when the span was already started/consumed elsewhere
         // (see OpenTelemetrySpanExt::set_parent's own doc comment) -- can't

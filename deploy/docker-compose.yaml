@@ -10,6 +10,9 @@ services:
       - "50051:50051"
     environment:
       DELTA_TXN_GRPC_ADDR: "0.0.0.0:50051"
+      # Local dev only: the service refuses to start with neither an API
+      # key nor a table allowlist unless this is set.
+      DELTA_TXN_ALLOW_INSECURE: "true"
       AWS_ENDPOINT_URL: "http://minio:9000"
       AWS_ACCESS_KEY_ID: "minioadmin"
       AWS_SECRET_ACCESS_KEY: "minioadmin"

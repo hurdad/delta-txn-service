@@ -169,11 +169,24 @@ AWS_ALLOW_HTTP=true
 - `DELTA_TXN_GRPC_ADDR`: Bind address for the gRPC server (default: `0.0.0.0:50051`).
 - `DELTA_TXN_GRPC_TLS_CERT`: Path to a PEM-encoded TLS certificate for gRPC.
 - `DELTA_TXN_GRPC_TLS_KEY`: Path to a PEM-encoded TLS private key for gRPC.
+- `DELTA_TXN_GRPC_TLS_CLIENT_CA`: Optional PEM CA bundle. When set (requires TLS), clients must present a
+  certificate signed by it (mutual TLS).
 - `DELTA_TXN_GRPC_API_KEY`: Optional API key for gRPC auth (clients send `x-api-key` or `authorization: Bearer ...`).
+- `DELTA_TXN_GRPC_API_KEYS`: Optional comma-separated `name=key` list of accepted keys. The matched key's name is
+  recorded as the `client` field on the request's trace span. To rotate a key, list the old and new key, move
+  clients over, then remove the old one.
 - `DELTA_TXN_ALLOWED_TABLE_PREFIXES`: Optional comma-separated list of `table_uri` prefixes. When set, `Commit`,
   `GetTable`, and `ListActiveFiles` all reject any `table_uri` that doesn't start with one of these prefixes. When
   unset (the default), a client may address any table URI the server's storage credentials can reach — set this in
   any deployment where the API key/network boundary isn't trusted to scope table access on its own.
+- `DELTA_TXN_ALLOW_INSECURE`: The service refuses to start with neither an API key nor a table allowlist.
+  Set this to `true` to allow that anyway (local development only).
+- `DELTA_TXN_MAX_ACTIONS_PER_COMMIT`: Largest number of actions one `Commit` may carry (default `100000`).
+- `DELTA_TXN_GRPC_MAX_MESSAGE_BYTES`: Largest request message accepted (default 4 MiB).
+- `DELTA_TXN_GRPC_REQUEST_TIMEOUT_SECS`: Per-request timeout, including time waiting on the per-table
+  commit lock (default `60`; `0` disables). Clients get `DEADLINE_EXCEEDED`.
+- `DELTA_TXN_GRPC_MAX_CONCURRENT_REQUESTS_PER_CONNECTION`: Concurrent requests per client connection
+  (default `64`).
 
 ### Storage (object-store)
 - `AWS_*`: All `AWS_` environment variables are forwarded to `delta-rs` object-store configuration
@@ -224,7 +237,8 @@ DELTA_TXN_GRPC_API_KEY=super-secret
 ### Docker
 ```bash
 docker build -t delta-txn-service .
-docker run -p 50051:50051 delta-txn-service
+# Local try-out with no auth; see "Security" before running it anywhere else.
+docker run -p 50051:50051 -e DELTA_TXN_ALLOW_INSECURE=true delta-txn-service
 ```
 
 ---
@@ -261,6 +275,40 @@ genuinely correlated, cross-process trace rather than two disconnected trace tre
 request's span.
 
 ---
+
+## Security
+
+What the service enforces:
+
+- **Authentication**: optional API keys (`DELTA_TXN_GRPC_API_KEY` / `DELTA_TXN_GRPC_API_KEYS`), compared in
+  constant time, and optional mutual TLS (`DELTA_TXN_GRPC_TLS_CLIENT_CA`). The health service is always
+  unauthenticated so orchestrator probes work.
+- **Table scoping**: `DELTA_TXN_ALLOWED_TABLE_PREFIXES` limits which `table_uri`s any caller can use, and file
+  paths inside actions must stay under the table root.
+- **Fail closed**: with neither API keys nor an allowlist the service won't start unless
+  `DELTA_TXN_ALLOW_INSECURE=true`. API keys without TLS log a startup warning.
+- **Limits**: per-request timeout, per-connection concurrency, maximum message size and maximum actions per
+  commit (see Configuration).
+
+Limits of the model:
+
+- Every valid key has the same access: there are no per-client permissions (read-only clients, or a key
+  limited to its own tables). Key names identify callers in traces, but don't restrict them.
+- A `Bearer` token is compared as a plain string; it isn't validated as a JWT/OIDC token.
+
+For production: always use TLS, set an allowlist, and give each client its own named key.
+
+## Client retry guidance
+
+| Status | Meaning | What to do |
+|---|---|---|
+| `ABORTED` | `expected_version` didn't match | Re-read with `GetTable`, rebuild the commit, retry |
+| `ALREADY_EXISTS` | The commit's `SetTransaction` version is already recorded | Treat as success; don't retry |
+| `DEADLINE_EXCEEDED`, `UNAVAILABLE` | Outcome unknown: the commit may or may not have landed | Retry only if the commit carries a `SetTransaction` (then a duplicate is refused); otherwise check `GetTable` / `ListActiveFiles` first |
+| `INVALID_ARGUMENT`, `FAILED_PRECONDITION`, `PERMISSION_DENIED`, `UNAUTHENTICATED` | Request is wrong | Fix the request; retrying won't help |
+
+Writers that retry should always include a `SetTransaction` with a monotonically increasing version per
+`app_id`, which makes retries safe.
 
 ## Repository layout
 

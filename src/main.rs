@@ -7,10 +7,10 @@ use std::time::Duration;
 use opentelemetry::global;
 use tokio::net::TcpStream;
 use tokio::signal;
-use tonic::transport::{Identity, Server, ServerTlsConfig};
-use tracing::info;
+use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
+use tracing::{info, warn};
 
-use delta_txn_service::config::grpc::load_grpc_config;
+use delta_txn_service::config::grpc::{check_security, load_grpc_config};
 use delta_txn_service::grpc::auth::make_auth_interceptor;
 use delta_txn_service::grpc::server::pb::delta_txn_service_server::DeltaTxnServiceServer;
 use delta_txn_service::grpc::server::DeltaTxnGrpcServer;
@@ -195,6 +195,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let grpc_config = load_grpc_config()?;
 
     let svc = DeltaTxnGrpcServer::new();
+
+    // Fail closed: see check_security's doc comment for the policy.
+    for warning in check_security(&grpc_config, svc.has_allowlist())? {
+        warn!("{warning}");
+    }
     // Tonic's per-service interceptor (metadata-only, runs after tower's
     // own Layer stack below has already routed the request to this
     // service) -- not a tower Layer itself, so it composes with
@@ -204,8 +209,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // unauthorized request still gets a trace span and shows up in
     // grpc.server.requests/errors -- deliberately observable, not silently
     // invisible, even though it's ultimately rejected.
+    // max_decoding_message_size bounds a single request message (tonic's
+    // own default is the same 4 MiB unless DELTA_TXN_GRPC_MAX_MESSAGE_BYTES
+    // overrides it).
     let svc =
-        DeltaTxnServiceServer::with_interceptor(svc, make_auth_interceptor(grpc_config.api_key));
+        DeltaTxnServiceServer::new(svc).max_decoding_message_size(grpc_config.max_message_bytes);
+    let svc = tonic::service::interceptor::InterceptedService::new(
+        svc,
+        make_auth_interceptor(grpc_config.api_keys.clone()),
+    );
 
     // The standard grpc.health.v1.Health service (tonic-health), reported
     // as SERVING for DeltaTxnService as soon as the process is ready to
@@ -241,16 +253,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // is present -- before anything else runs, so metrics_layer's recording
     // (and every tracing::info!/error! log call anywhere under this
     // request) happens inside that span's scope rather than alongside it.
-    let mut server = Server::builder()
-        .layer(TraceContextLayer::new())
-        .layer(metrics_layer);
-
-    if let Some(tls_config) = grpc_config.tls {
-        let cert = std::fs::read(tls_config.cert_path)?;
-        let key = std::fs::read(tls_config.key_path)?;
-        let identity = Identity::from_pem(cert, key);
-        server = server.tls_config(ServerTlsConfig::new().identity(identity))?;
+    //
+    // timeout() bounds how long a handler may run before the client gets
+    // DEADLINE_EXCEEDED (including time spent waiting on the per-table
+    // commit lock); for ListActiveFiles it covers producing the response,
+    // not draining the stream. concurrency_limit_per_connection keeps one
+    // client connection from monopolizing the server.
+    let mut builder = Server::builder()
+        .concurrency_limit_per_connection(grpc_config.max_concurrent_requests_per_connection);
+    if let Some(timeout) = grpc_config.request_timeout {
+        builder = builder.timeout(timeout);
     }
+
+    if let Some(tls_config) = &grpc_config.tls {
+        let cert = std::fs::read(&tls_config.cert_path)?;
+        let key = std::fs::read(&tls_config.key_path)?;
+        let mut tls = ServerTlsConfig::new().identity(Identity::from_pem(cert, key));
+        if let Some(ca_path) = &tls_config.client_ca_path {
+            // Mutual TLS: only clients with a certificate signed by this
+            // CA can connect at all.
+            let ca = std::fs::read(ca_path)?;
+            tls = tls.client_ca_root(Certificate::from_pem(ca));
+            info!("mutual TLS enabled: client certificates are required");
+        }
+        builder = builder.tls_config(tls)?;
+    }
+
+    let mut server = builder.layer(TraceContextLayer::new()).layer(metrics_layer);
 
     server
         .add_service(svc)

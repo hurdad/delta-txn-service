@@ -23,7 +23,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 
-use delta_txn_service::grpc::auth::make_auth_interceptor;
+use delta_txn_service::grpc::auth::{make_auth_interceptor, single_api_key};
 // `pub use`, not `use`: test files reference these as `common::pb::...`
 // rather than each needing their own `use delta_txn_service::grpc::...`.
 pub use delta_txn_service::grpc::server::pb;
@@ -52,6 +52,8 @@ pub struct TestServerConfig {
     /// majority of this suite) needs. Only `tests/e2e_minio.rs` sets this,
     /// to supply `AWS_ENDPOINT_URL`/credentials for a real MinIO backend.
     pub storage_opts: HashMap<String, String>,
+    /// Overrides DEFAULT_MAX_ACTIONS_PER_COMMIT when set.
+    pub max_actions_per_commit: Option<usize>,
 }
 
 /// A running `DeltaTxnGrpcServer` plus the tempdir its `file://` tables
@@ -94,10 +96,15 @@ impl TestServer {
             .local_addr()
             .expect("failed to read test server listener's bound address");
 
-        let svc =
+        let mut svc =
             DeltaTxnGrpcServer::with_config(config.storage_opts, config.allowed_table_prefixes);
-        let svc =
-            DeltaTxnServiceServer::with_interceptor(svc, make_auth_interceptor(config.api_key));
+        if let Some(max) = config.max_actions_per_commit {
+            svc = svc.with_max_actions_per_commit(max);
+        }
+        let svc = DeltaTxnServiceServer::with_interceptor(
+            svc,
+            make_auth_interceptor(single_api_key(config.api_key)),
+        );
 
         // Mirrors main.rs's own health-service wiring (see that file's
         // comment on why it's unauthenticated / outside the interceptor):

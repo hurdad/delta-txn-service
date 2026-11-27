@@ -143,3 +143,45 @@ async fn commit_rejects_an_action_with_unspecified_data_change() {
         .expect_err("an AddFile with DATA_CHANGE_UNSPECIFIED must be rejected");
     assert_eq!(err.code(), Code::InvalidArgument);
 }
+
+#[tokio::test]
+async fn commit_with_no_actions_is_rejected() {
+    let server = common::TestServer::start(Default::default()).await;
+    let table_uri = server.new_table_uri("empty");
+    let mut client = server.connect().await;
+
+    let err = client
+        .commit(commit_request(&table_uri, None, Vec::new()))
+        .await
+        .expect_err("an empty commit is meaningless");
+    assert_eq!(err.code(), Code::InvalidArgument);
+}
+
+#[tokio::test]
+async fn commit_with_too_many_actions_is_rejected() {
+    let server = common::TestServer::start(common::TestServerConfig {
+        max_actions_per_commit: Some(2),
+        ..Default::default()
+    })
+    .await;
+    let table_uri = server.new_table_uri("limit");
+    let mut client = server.connect().await;
+
+    let mut actions = create_table_actions("limit");
+    actions.push(add_file_action("a.parquet", 1));
+    let err = client
+        .commit(commit_request(&table_uri, None, actions))
+        .await
+        .expect_err("3 actions exceeds a limit of 2");
+    assert_eq!(err.code(), Code::InvalidArgument);
+    assert!(err.message().contains("DELTA_TXN_MAX_ACTIONS_PER_COMMIT"));
+
+    client
+        .commit(commit_request(
+            &table_uri,
+            None,
+            create_table_actions("limit"),
+        ))
+        .await
+        .expect("2 actions is within the limit");
+}

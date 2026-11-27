@@ -39,6 +39,12 @@ const FILE_BATCH_SIZE: usize = 1000;
 // stream.
 const STREAM_CHANNEL_CAPACITY: usize = 4;
 
+/// Default cap on actions in one Commit (DELTA_TXN_MAX_ACTIONS_PER_COMMIT).
+/// A commit's actions are all held in memory, mapped, and written while
+/// the per-table lock is held, so an unbounded list lets one client stall
+/// every other writer to that table. 100k covers a large OPTIMIZE.
+pub const DEFAULT_MAX_ACTIONS_PER_COMMIT: usize = 100_000;
+
 type ListActiveFilesResultStream =
     Pin<Box<dyn Stream<Item = Result<ListActiveFilesResponse, Status>> + Send>>;
 
@@ -67,6 +73,7 @@ pub struct DeltaTxnGrpcServer {
     /// changing AWS_* env vars at runtime has no effect until restart.
     storage_opts: HashMap<String, String>,
     allowed_table_prefixes: Option<Vec<String>>,
+    max_actions_per_commit: usize,
 }
 
 impl DeltaTxnGrpcServer {
@@ -81,7 +88,26 @@ impl DeltaTxnGrpcServer {
             );
         }
 
+        let max_actions_per_commit = std::env::var("DELTA_TXN_MAX_ACTIONS_PER_COMMIT")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(DEFAULT_MAX_ACTIONS_PER_COMMIT);
+
         Self::with_config(load_storage_options(), allowed_table_prefixes)
+            .with_max_actions_per_commit(max_actions_per_commit)
+    }
+
+    /// Overrides DEFAULT_MAX_ACTIONS_PER_COMMIT.
+    pub fn with_max_actions_per_commit(mut self, max: usize) -> Self {
+        self.max_actions_per_commit = max.max(1);
+        self
+    }
+
+    /// Whether a table_uri allowlist is configured -- main.rs's startup
+    /// security check needs this (see config::grpc::check_security).
+    pub fn has_allowlist(&self) -> bool {
+        self.allowed_table_prefixes.is_some()
     }
 
     /// Constructs a server from already-resolved configuration rather than
@@ -101,6 +127,7 @@ impl DeltaTxnGrpcServer {
             locks: TableLockManager::default(),
             storage_opts,
             allowed_table_prefixes,
+            max_actions_per_commit: DEFAULT_MAX_ACTIONS_PER_COMMIT,
         }
     }
 
@@ -383,7 +410,17 @@ impl DeltaTxnService for DeltaTxnGrpcServer {
         // malformed action list (e.g. an unspecified data_change) is a
         // pure client-input error that doesn't need either a network round
         // trip to storage or the per-table lock held while it's rejected.
-        let actions = map_actions(r.actions).map_err(|e| Status::invalid_argument(e))?;
+        if r.actions.is_empty() {
+            return Err(Status::invalid_argument("actions must not be empty"));
+        }
+        if r.actions.len() > self.max_actions_per_commit {
+            return Err(Status::invalid_argument(format!(
+                "{} actions exceeds the limit of {} per commit (DELTA_TXN_MAX_ACTIONS_PER_COMMIT)",
+                r.actions.len(),
+                self.max_actions_per_commit
+            )));
+        }
+        let actions = map_actions(r.actions).map_err(Status::invalid_argument)?;
 
         // Held across the whole exists-check -> open-table -> version-check
         // -> commit sequence below, not just the commit call itself -- see
