@@ -146,7 +146,7 @@ proto/delta_txn.proto
 ## Storage backends
 
 Supported via [`delta-rs`](https://github.com/delta-io/delta-rs) — currently the
-`deltalake` crate **1.1.1** (see `Cargo.toml`; keep this line in sync when bumping it):
+`deltalake` crate **1.1.2** (see `Cargo.toml`; keep this line in sync when bumping it):
 - Amazon S3
 - S3-compatible stores that support conditional writes (`If-None-Match` on PutObject), which
   delta-rs's S3 commit protocol relies on. Tested in CI against SeaweedFS.

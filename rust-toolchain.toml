@@ -1,0 +1,6 @@
+# Pins the toolchain for local builds; CI (dtolnay/rust-toolchain) and the
+# Dockerfile's rust image use the same version. Bump all of them together,
+# along with Cargo.toml's rust-version.
+[toolchain]
+channel = "1.100.0"
+components = ["rustfmt", "clippy", "llvm-tools-preview"]

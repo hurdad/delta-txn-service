@@ -2,37 +2,37 @@
 name = "delta-txn-service"
 version = "0.1.1"
 edition = "2021"
-# Matches the toolchain pinned in CI (dtolnay/rust-toolchain@1.94.1) and the
+# Matches the toolchain pinned in CI (dtolnay/rust-toolchain@1.100.0) and the
 # Dockerfile. Also makes `cargo update` prefer dependency versions that
 # support it (see .cargo/config.toml).
-rust-version = "1.94.1"
+rust-version = "1.100.0"
 license = "Apache-2.0"
 
 [dependencies]
 # -----------------------------
 # Async runtime
 # -----------------------------
-tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "signal"] }
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "signal"] }
 # ReceiverStream, adapting a tokio::sync::mpsc::Receiver into the
 # futures_core::Stream ListActiveFiles' server-streaming response needs.
 # `net`: TcpListenerStream, used only by the integration test harness
 # (tests/common/mod.rs) to serve on an OS-assigned ephemeral port and learn
 # its actual address before handing the listener to tonic.
-tokio-stream = { version = "0.1.17", features = ["net"] }
+tokio-stream = { version = "0.1.19", features = ["net"] }
 
 # -----------------------------
 # gRPC / Protobuf
 # -----------------------------
-tonic = { version = "0.14.3", features = ["tls-ring"] }
-tonic-prost = "0.14.3"
-prost = "0.14.3"
-prost-types = "0.14.3"
+tonic = { version = "0.14.9", features = ["tls-ring"] }
+tonic-prost = "0.14.9"
+prost = "0.14.6"
+prost-types = "0.14.6"
 # The standard grpc.health.v1.Health service, unauthenticated (added
 # alongside DeltaTxnServiceServer in main.rs, not behind
 # make_auth_interceptor) -- lets Kubernetes/other orchestrators use a real
 # gRPC health probe instead of a bare TCP-connect check, without needing to
 # supply an API key from a liveness/readiness probe.
-tonic-health = "0.14.6"
+tonic-health = "0.14.9"
 # Direct dependency only to pick the process-wide crypto provider (see
 # app::install_crypto_provider): the dependency graph enables both of
 # rustls's backends (ring via tonic/otlp tls-ring, aws-lc-rs via delta-rs's
@@ -40,22 +40,22 @@ tonic-health = "0.14.6"
 # itself and panics on the first TLS handshake.
 rustls = { version = "0.23.46", default-features = false, features = ["ring"] }
 tower = "0.5.3"
-http-body = "1.0.1"
+http-body = "1.1.0"
 # Safe Pin projection for MetricsBody (telemetry/metrics.rs) -- already
 # resolved transitively (tonic/tower's own dependency graph pulls it in),
 # declared directly here since this crate's own code now uses its
 # `pin_project!` macro too.
-pin-project-lite = "0.2.17"
+pin-project-lite = "0.2.18"
 
 # -----------------------------
 # Delta Lake (native)
 # -----------------------------
-deltalake = { version = "1.1.1", features = ["s3"] }
+deltalake = { version = "1.1.2", features = ["s3"] }
 # Already resolved transitively (deltalake's own table_uri/log_store types
 # use it); declared directly since delta::table::table_exists and
 # delta::commit::create_table now name `url::Url` themselves rather than
 # only ever passing it through opaquely.
-url = "2.5.8"
+url = "2.5.9"
 # Converts GetTable/ListActiveFiles `timestamp_ms` into the DateTime
 # delta-rs time travel takes. Already in the tree via deltalake.
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }
@@ -63,26 +63,32 @@ chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 # -----------------------------
 # Concurrency / locking
 # -----------------------------
-dashmap = "6.1.0"
+dashmap = "6.2.1"
 
 # -----------------------------
 # Serialization / utilities
 # -----------------------------
-thiserror = "2.0.18"
-serde_json = "1.0.149"
+thiserror = "2.0.21"
+serde_json = "1.0.154"
 
 # -----------------------------
 # Observability
 # -----------------------------
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.22", features = ["env-filter", "json"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 tracing-opentelemetry = "0.34.0"
 opentelemetry = "0.33.1"
 opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["grpc-tonic", "trace", "metrics", "internal-logs", "tls-ring"] }
 opentelemetry_sdk = { version = "0.33.1", features = ["rt-tokio"] }
 
 [build-dependencies]
-tonic-prost-build = "0.14.3"
+tonic-prost-build = "0.14.9"
+
+# The Docker image is a static musl build (see Dockerfile). musl's malloc
+# is slow under multithreaded load, so those builds use mimalloc; glibc
+# builds keep the system allocator.
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = { version = "0.1", default-features = false }
 
 [dev-dependencies]
 rcgen = "0.14.10"
@@ -98,7 +104,7 @@ codegen-units = 1
 strip = true
 
 # `cargo test --release` builds test binaries against [profile.release]
-# directly (verified against cargo 1.94.1 -- there is no separate `bench`
+# directly (verified against cargo 1.94.1 and 1.100.0 -- there is no separate `bench`
 # profile indirection to override here). Fat LTO + a single codegen unit
 # for every test binary, on top of the already-massive deltalake/arrow/parquet
 # dependency graph, is enough peak memory during linking to OOM a Docker

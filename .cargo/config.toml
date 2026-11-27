@@ -2,6 +2,6 @@
 # (Cargo.toml's `rust-version`), falling back to newer ones only when no
 # compatible version exists. Without this, a plain `cargo update` happily
 # picks crates that need a newer Rust than CI and the Dockerfile pin
-# (e.g. deltalake 1.1.2 needs 1.95), and the build then fails there.
+# (e.g. deltalake 1.1.2 needed 1.95 while we were on 1.94.1), and the build then fails there.
 [resolver]
 incompatible-rust-versions = "fallback"
