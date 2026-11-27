@@ -16,7 +16,9 @@ Both suites (unit + integration) run together; Cargo treats every file
 directly under `tests/` as its own test binary. No external services are
 required — each test gets its own throwaway `file://` Delta table under a
 fresh `tempdir`, so this runs anywhere, including inside the Docker build's
-`RUN cargo test --release` step, with no S3/MinIO dependency.
+`RUN cargo test --profile release-test` step, with no S3/MinIO dependency.
+The one exception is `e2e_minio.rs` (below), which skips itself unless
+pointed at a real S3-compatible backend.
 
 ## Layout
 
@@ -43,6 +45,12 @@ fresh `tempdir`, so this runs anywhere, including inside the Docker build's
   table using the documented read-then-commit-with-`expected_version`
   retry pattern, verifying `TableLockManager` and delta-rs's own
   optimistic concurrency produce no lost updates.
+- **`e2e_minio.rs`** — the same kind of coverage against a real
+  S3-compatible backend (MinIO), since `object_store`'s S3 and local
+  filesystem backends differ in conditional-put semantics — exactly what
+  conflict detection depends on. A no-op unless `AWS_ENDPOINT_URL` and
+  `DELTA_TXN_TEST_S3_BUCKET` are set; CI's `minio-integration-tests` job
+  sets them. Run it with `cargo test --test e2e_minio`.
 
 ## Why this suite exists
 

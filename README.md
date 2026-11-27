@@ -1,6 +1,7 @@
 # Delta Txn Service
 
 [![Build](https://github.com/hurdad/delta-txn-service/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/hurdad/delta-txn-service/actions/workflows/docker-publish.yml)
+[![codecov](https://codecov.io/gh/hurdad/delta-txn-service/graph/badge.svg)](https://codecov.io/gh/hurdad/delta-txn-service)
 
 A **high-performance Delta Lake transaction coordinator** implemented in **Rust + gRPC**, designed to provide **atomic, typed, non-Spark commits** to Delta Lake tables.
 
@@ -93,7 +94,7 @@ whatever snapshot is visible at the moment the server opens the table.
 Atomically commit Delta actions.
 
 - Optimistic concurrency via `expected_version`
-- Fully typed protobuf actions (no JSON)
+- Fully typed protobuf actions (no JSON on the wire)
 - If `table_uri` doesn't exist yet, this Commit creates it as the table's version-0 commit —
   `actions` must include both a `Protocol` and a `TableMetadata` action, and `expected_version`
   must be left unset. Every subsequent `Commit` to that `table_uri` behaves as an ordinary
@@ -129,7 +130,8 @@ proto/delta_txn.proto
 
 ## Storage backends
 
-Supported via `delta-rs`:
+Supported via [`delta-rs`](https://github.com/delta-io/delta-rs) — currently the
+`deltalake` crate **0.32.4** (see `Cargo.toml`; keep this line in sync when bumping it):
 - Amazon S3
 - MinIO
 - Local filesystem (`file:///`)
@@ -165,7 +167,8 @@ AWS_ALLOW_HTTP=true
 
 ### Telemetry (OpenTelemetry)
 - `OTEL_SERVICE_NAME`: Service name used in traces/metrics (default: `delta-txn-service`).
-- `OTEL_EXPORTER_OTLP_PROTOCOL`: Export protocol (`grpc`, `http/protobuf`, or `http/json`).
+- OTLP export is gRPC only: `OTEL_EXPORTER_OTLP_PROTOCOL` is not honored, and a non-`grpc` value logs a
+  startup warning. Point the endpoint at the collector's gRPC port (usually 4317).
 - `OTEL_EXPORTER_OTLP_ENDPOINT`: Shared OTLP endpoint for traces + metrics.
 - `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`: Overrides traces endpoint.
 - `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`: Overrides metrics endpoint.
@@ -255,6 +258,7 @@ delta-txn-service/
 │   ├── locking/           # per-table commit locks
 │   ├── config/            # storage + gRPC server config
 │   └── telemetry/         # tracing setup, request tracing/metrics middleware
+├── tests/                 # gRPC end-to-end suite (see tests/README.md)
 ├── deploy/                # Helm / K8s / Compose
 └── Dockerfile
 ```
@@ -264,7 +268,8 @@ delta-txn-service/
 ## Concurrency model
 
 - Delta Lake optimistic concurrency is always enforced
-- Optional in-process per-table async locks reduce conflicts
+- In-process per-table async locks (always on) reduce conflicts within a replica —
+  an optimization, not a correctness requirement
 - Safe to run multiple replicas (stateless)
 
 The internal Delta operation type used for the server's own conflict-detection
@@ -279,7 +284,7 @@ represented on the wire today).
 
 ## Performance characteristics
 
-- No JSON parsing in the hot path
+- No JSON on the wire (protobuf in, Delta log JSON written only by delta-rs)
 - No GIL
 - No JVM
 - Low RSS
@@ -294,7 +299,7 @@ This is **significantly faster and more predictable** than Python-based coordina
 - Centralized Delta commit coordinator
 - Arrow / C++ data pipelines
 - Lightweight Delta metadata services
-- Edge / ARM64 environments
+- Edge / ARM64 environments (build from source — published images are amd64-only for now)
 
 ---
 

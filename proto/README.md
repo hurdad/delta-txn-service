@@ -20,7 +20,7 @@ rebuild (see `build.rs` at the repo root).
 - **`ListActiveFiles`** — server-streaming. Every currently-active data
   file for a table's latest version, the read-side counterpart to
   `Commit`'s `AddFile`/`RemoveFile` actions. Streamed (a header message
-  followed by one or more batches) rather than unary, since a real table's
+  followed by zero or more batches — zero for a table with no active files) rather than unary, since a real table's
   file set can exceed gRPC's default 4 MiB message limit.
 
 ## Actions

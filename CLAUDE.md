@@ -15,13 +15,13 @@ cargo test --test e2e_minio    # the one integration suite gated on real MinIO e
 cargo test <substring>         # run tests whose name contains <substring>, across all binaries
 cargo run                      # run locally; needs DELTA_TXN_GRPC_ADDR etc., see README's Configuration section
 
-docker build -t delta-txn-service .                              # full multi-stage build (also runs cargo test --release)
+docker build -t delta-txn-service .                              # full multi-stage build (also runs cargo test --profile release-test)
 docker compose -f deploy/docker-compose.yaml up -d --build        # local dev stack: service + MinIO
 ```
 
-No lint/format tooling is configured in this repo (no `rustfmt.toml`/`clippy.toml`, no CI step running either) — don't assume `cargo fmt`/`cargo clippy` conformance is enforced anywhere.
+Formatting is enforced: `rustfmt.toml` pins `edition`, and `.github/workflows/ci.yml`'s `fmt` job runs `cargo fmt --all -- --check` on every PR — run `cargo fmt --all` before committing. Clippy is not configured or run in CI.
 
-**Docker build must include `tests/`.** The Dockerfile's builder stage explicitly `COPY`s `build.rs`, `proto/`, `src/`, and `tests/` before running `cargo build`/`cargo test` — if you ever restructure the Dockerfile, dropping the `tests/` copy makes `cargo test --release` silently run zero integration tests (no error, no output about them, `tests/` just doesn't exist in that build context). This already happened once; it's why that `COPY` line has a comment on it.
+**Docker build must include `tests/`.** The Dockerfile's builder stage explicitly `COPY`s `build.rs`, `proto/`, `src/`, and `tests/` before running `cargo build`/`cargo test` — if you ever restructure the Dockerfile, dropping the `tests/` copy makes `cargo test --profile release-test` silently run zero integration tests (no error, no output about them, `tests/` just doesn't exist in that build context). This already happened once; it's why that `COPY` line has a comment on it.
 
 ## Architecture
 

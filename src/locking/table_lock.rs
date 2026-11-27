@@ -41,8 +41,8 @@ impl TableLockManager {
     // mutexes, with no mutual exclusion between them at all. Delta's own
     // commit protocol (atomic conditional-put on the log file) still
     // prevents actual data corruption if that happens, but it defeats the
-    // whole reason this lock exists (see README's "Optional in-process
-    // per-table async locks reduce conflicts") -- a spurious storage-level
+    // whole reason this lock exists (see README's "Concurrency model":
+    // in-process per-table async locks reduce conflicts) -- a spurious storage-level
     // version conflict where a clean, serialized commit was supposed to be
     // guaranteed. Using DashMap's Entry API (which holds the shard lock for
     // the entry's *entire* match arm, exactly like lock_for()'s own

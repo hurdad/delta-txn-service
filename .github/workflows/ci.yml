@@ -10,12 +10,12 @@ name: CI
 #
 # Deliberately does not also trigger on `push: branches: [main]`:
 # docker-publish.yml already builds (and, via the Dockerfile's own
-# `RUN cargo test --release` step, tests) every push to main -- adding the
+# `RUN cargo test --profile release-test` step, tests) every push to main -- adding the
 # same trigger here would just build everything a second time for no
 # additional signal. `target: builder` stops the build at the same stage
 # docker-publish.yml's own multi-stage build passes through on its way to
 # the runtime image, so this runs the identical `cargo build --release` +
-# `cargo test --release` steps, just without ever assembling or pushing
+# `cargo test --profile release-test` steps, just without ever assembling or pushing
 # the final runtime image.
 on:
   pull_request:
