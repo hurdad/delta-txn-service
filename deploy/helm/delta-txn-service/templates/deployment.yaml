@@ -104,6 +104,14 @@ spec:
             - name: DELTA_TXN_MAX_ACTIONS_PER_COMMIT
               value: {{ . | quote }}
             {{- end }}{{ end }}
+            {{- with .Values.grpc.snapshotCacheSize | toString }}{{ if . }}
+            - name: DELTA_TXN_SNAPSHOT_CACHE_SIZE
+              value: {{ . | quote }}
+            {{- end }}{{ end }}
+            {{- with .Values.grpc.snapshotCacheTtlSeconds | toString }}{{ if . }}
+            - name: DELTA_TXN_SNAPSHOT_CACHE_TTL_SECS
+              value: {{ . | quote }}
+            {{- end }}{{ end }}
             {{- range $key, $value := .Values.storage.aws }}
             {{- if and $value (ne $key "AWS_ACCESS_KEY_ID") (ne $key "AWS_SECRET_ACCESS_KEY") }}
             - name: {{ $key }}

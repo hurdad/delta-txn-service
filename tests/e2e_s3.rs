@@ -20,6 +20,7 @@
 mod common;
 
 use common::{add_file_action, commit_request, create_table_actions, pb, TestServerConfig};
+use delta_txn_service::delta::cache::{LookupResult, SnapshotCache};
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use tonic::Code;
@@ -291,4 +292,41 @@ async fn concurrent_writers_across_two_replicas_lose_no_updates_on_s3() {
         }
     }
     assert_eq!(paths.len(), WRITERS_PER_REPLICA * 2, "{paths:?}");
+}
+
+/// The snapshot cache's commit-file check goes through the table-scoped
+/// object store, whose rooting differs per backend; make sure lookups
+/// actually hit (and stay current) on S3, not just on file://.
+#[tokio::test]
+async fn snapshot_cache_hits_and_stays_current_on_s3() {
+    let (storage_opts, table_uri) = skip_unless_s3_configured!("snapshot-cache");
+    let server = start_server(storage_opts.clone()).await;
+    let mut client = server.connect().await;
+    client
+        .commit(commit_request(
+            &table_uri,
+            None,
+            create_table_actions("orders"),
+        ))
+        .await
+        .expect("create commit should succeed");
+
+    let url = url::Url::parse(&table_uri).unwrap();
+    let cache = SnapshotCache::new(4, std::time::Duration::from_secs(300));
+    let (_, first) = cache
+        .latest_with_result(&url, storage_opts.clone())
+        .await
+        .unwrap();
+    assert_eq!(first, LookupResult::Miss);
+
+    client
+        .commit(commit_request(
+            &table_uri,
+            Some(0),
+            vec![add_file_action("a.parquet", 1)],
+        ))
+        .await
+        .expect("append should succeed");
+    let (table, second) = cache.latest_with_result(&url, storage_opts).await.unwrap();
+    assert_eq!((table.version(), second), (Some(1), LookupResult::Hit));
 }

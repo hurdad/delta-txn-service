@@ -183,6 +183,12 @@ AWS_ALLOW_HTTP=true
 - `DELTA_TXN_ALLOW_INSECURE`: The service refuses to start with neither an API key nor a table allowlist.
   Set this to `true` to allow that anyway (local development only).
 - `DELTA_TXN_MAX_ACTIONS_PER_COMMIT`: Largest number of actions one `Commit` may carry (default `100000`).
+- `DELTA_TXN_SNAPSHOT_CACHE_SIZE`: How many tables each replica keeps loaded in memory (default `32`; `0`
+  disables). A cached table catches up by replaying only new commits instead of reloading from the last
+  checkpoint; it still lists `_delta_log` on every request, so reads are never stale. Larger tables use more
+  memory per entry (the active-file list is held in Arrow form). Metric: `delta_txn.snapshot_cache.lookups`
+  by `result` (`hit`, `miss`, `refresh_failed`).
+- `DELTA_TXN_SNAPSHOT_CACHE_TTL_SECS`: Reload a cached table from scratch at least this often (default `300`).
 - `DELTA_TXN_GRPC_MAX_MESSAGE_BYTES`: Largest request message accepted (default 4 MiB).
 - `DELTA_TXN_GRPC_REQUEST_TIMEOUT_SECS`: Per-request timeout, including time waiting on the per-table
   commit lock (default `60`; `0` disables). Clients get `DEADLINE_EXCEEDED`.

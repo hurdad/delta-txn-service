@@ -26,6 +26,9 @@ use std::net::SocketAddr;
 
 use delta_txn_service::app::{self, BoxError, ServeOptions};
 use delta_txn_service::config::grpc::{parse_grpc_config, TlsConfig};
+use delta_txn_service::delta::cache::{
+    SnapshotCache, DEFAULT_SNAPSHOT_CACHE_SIZE, DEFAULT_SNAPSHOT_CACHE_TTL,
+};
 use delta_txn_service::grpc::auth::single_api_key;
 // `pub use`, not `use`: test files reference these as `common::pb::...`
 // rather than each needing their own `use delta_txn_service::grpc::...`.
@@ -67,6 +70,10 @@ pub struct TestServerConfig {
     /// Enables the storage readiness probe against this endpoint.
     pub storage_probe_endpoint: Option<String>,
     pub storage_probe_interval: Option<Duration>,
+    /// The snapshot cache to use; a clone stays with the test so it can
+    /// inspect it. None gets a default-sized cache, as in production, so
+    /// the whole suite runs through it.
+    pub snapshot_cache: Option<SnapshotCache>,
 }
 
 /// A running `DeltaTxnGrpcServer` plus the tempdir its `file://` tables
@@ -115,6 +122,9 @@ impl TestServer {
         if let Some(max) = config.max_actions_per_commit {
             svc = svc.with_max_actions_per_commit(max);
         }
+        svc = svc.with_snapshot_cache(config.snapshot_cache.unwrap_or_else(|| {
+            SnapshotCache::new(DEFAULT_SNAPSHOT_CACHE_SIZE, DEFAULT_SNAPSHOT_CACHE_TTL)
+        }));
 
         // Start from the same defaults an operator with no env vars set
         // gets, then apply this test's overrides.

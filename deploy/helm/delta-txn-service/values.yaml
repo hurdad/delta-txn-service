@@ -50,6 +50,11 @@ grpc:
   maxConcurrentRequestsPerConnection: ""
   maxMessageBytes: ""
   maxActionsPerCommit: ""
+  # DELTA_TXN_SNAPSHOT_CACHE_SIZE / _TTL_SECS: tables kept loaded per
+  # replica (default 32; 0 disables) and how often each is reloaded from
+  # scratch (default 300). Size memory limits with this in mind.
+  snapshotCacheSize: ""
+  snapshotCacheTtlSeconds: ""
 
 storage:
   aws:

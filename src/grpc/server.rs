@@ -21,8 +21,9 @@ use crate::config::storage::{
 };
 use crate::delta::errors::DeltaTxnError;
 use crate::delta::{
+    cache::{snapshot_cache_from_env, SnapshotCache},
     commit::{commit_actions, create_table, find_metadata, find_protocol},
-    table::{open_table, open_table_at, table_exists, ReadAt},
+    table::{open_table_at, table_exists, ReadAt},
 };
 use crate::grpc::mapping::{map_actions, map_active_file_to_pb, map_protocol_to_pb};
 use crate::locking::table_lock::TableLockManager;
@@ -76,6 +77,10 @@ pub struct DeltaTxnGrpcServer {
     allowed_table_prefixes: Option<Vec<String>>,
     max_actions_per_commit: usize,
     metrics: CommitMetrics,
+    /// Loaded tables per table_uri, caught up incrementally on each
+    /// latest-version access (see delta::cache). Disabled by default in
+    /// with_config; new() enables it from the environment.
+    snapshots: SnapshotCache,
 }
 
 impl DeltaTxnGrpcServer {
@@ -99,8 +104,19 @@ impl DeltaTxnGrpcServer {
             .filter(|n| *n > 0)
             .unwrap_or(DEFAULT_MAX_ACTIONS_PER_COMMIT);
 
+        let snapshots = snapshot_cache_from_env(|k| std::env::var(k).ok())
+            .with_metrics(&opentelemetry::global::meter("delta-txn-service"));
+
         Self::with_config(load_storage_options(), allowed_table_prefixes)
             .with_max_actions_per_commit(max_actions_per_commit)
+            .with_snapshot_cache(snapshots)
+    }
+
+    /// Uses `cache` for latest-version table loads (Commit, GetTable,
+    /// ListActiveFiles). Time-travel reads always load directly.
+    pub fn with_snapshot_cache(mut self, cache: SnapshotCache) -> Self {
+        self.snapshots = cache;
+        self
     }
 
     /// Overrides DEFAULT_MAX_ACTIONS_PER_COMMIT.
@@ -133,6 +149,7 @@ impl DeltaTxnGrpcServer {
             storage_opts,
             allowed_table_prefixes,
             max_actions_per_commit: DEFAULT_MAX_ACTIONS_PER_COMMIT,
+            snapshots: SnapshotCache::disabled(),
             // The global meter is a no-op until init_tracing installs an
             // OTLP meter provider, which main.rs does before this runs.
             metrics: CommitMetrics::new(&opentelemetry::global::meter("delta-txn-service")),
@@ -233,7 +250,11 @@ impl DeltaTxnGrpcServer {
             ));
         }
 
-        let table = open_table(&normalized_table_uri, self.storage_opts.clone())
+        // Caught up to the latest version, so expected_version and the
+        // txn idempotency check below see the same state a fresh load would.
+        let table = self
+            .snapshots
+            .latest(&normalized_table_uri, self.storage_opts.clone())
             .await
             .map_err(Status::from)?;
 
@@ -345,6 +366,20 @@ impl DeltaTxnGrpcServer {
     }
 }
 
+/// Latest-version reads go through the snapshot cache; time-travel reads
+/// load the requested version directly.
+async fn load_for_read(
+    snapshots: &SnapshotCache,
+    table_uri: &Url,
+    storage_opts: HashMap<String, String>,
+    at: ReadAt,
+) -> Result<deltalake::DeltaTable, DeltaTxnError> {
+    match at {
+        ReadAt::Latest => snapshots.latest(table_uri, storage_opts).await,
+        _ => open_table_at(table_uri, storage_opts, at).await,
+    }
+}
+
 /// Turns a read request's optional time-travel fields into a ReadAt.
 /// Setting both is ambiguous, and negative values can't name a version or
 /// a representable instant, so all of those are INVALID_ARGUMENT.
@@ -425,10 +460,11 @@ fn map_open_or_snapshot_error(e: DeltaTableError) -> Status {
 async fn stream_active_files(
     table_uri: Url,
     storage_opts: HashMap<String, String>,
+    snapshots: SnapshotCache,
     at: ReadAt,
     tx: tokio::sync::mpsc::Sender<Result<ListActiveFilesResponse, Status>>,
 ) {
-    let result = stream_active_files_inner(table_uri, storage_opts, at, &tx).await;
+    let result = stream_active_files_inner(table_uri, storage_opts, &snapshots, at, &tx).await;
     if let Err(status) = result {
         let _ = tx.send(Err(status)).await;
     }
@@ -437,6 +473,7 @@ async fn stream_active_files(
 async fn stream_active_files_inner(
     table_uri: Url,
     storage_opts: HashMap<String, String>,
+    snapshots: &SnapshotCache,
     at: ReadAt,
     tx: &tokio::sync::mpsc::Sender<Result<ListActiveFilesResponse, Status>>,
 ) -> Result<(), Status> {
@@ -449,7 +486,7 @@ async fn stream_active_files_inner(
         )));
     }
 
-    let table = open_table_at(&table_uri, storage_opts, at)
+    let table = load_for_read(snapshots, &table_uri, storage_opts, at)
         .await
         .map_err(Status::from)?;
 
@@ -601,9 +638,14 @@ impl DeltaTxnService for DeltaTxnGrpcServer {
             )));
         }
 
-        let table = open_table_at(&normalized_table_uri, self.storage_opts.clone(), at)
-            .await
-            .map_err(Status::from)?;
+        let table = load_for_read(
+            &self.snapshots,
+            &normalized_table_uri,
+            self.storage_opts.clone(),
+            at,
+        )
+        .await
+        .map_err(Status::from)?;
 
         let snapshot = table.snapshot().map_err(map_open_or_snapshot_error)?;
         let (metadata, protocol) = build_metadata_and_protocol(snapshot)?;
@@ -658,6 +700,7 @@ impl DeltaTxnService for DeltaTxnGrpcServer {
         tokio::spawn(stream_active_files(
             normalized_table_uri,
             storage_opts,
+            self.snapshots.clone(),
             at,
             tx,
         ));

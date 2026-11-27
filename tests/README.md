@@ -59,6 +59,12 @@ pointed at a real S3-compatible backend.
   protocol table features and deletion-vector pass-through, and
   rejection of file paths that escape the table root, and partition
   values round-tripping through `ListActiveFiles`.
+- **`e2e_snapshot_cache.rs`** — the per-replica snapshot cache
+  (`delta::cache`): cached reads and commits stay current with this
+  server's commits and with another replica's; a deleted-and-recreated
+  `_delta_log` is detected and reloaded; TTL expiry, LRU eviction,
+  disabling, and time travel bypassing the cache. Every other test file
+  also runs through the cache, since `tests/common` enables it.
 - **`e2e_s3.rs`** — the same kind of coverage against a real
   S3-compatible backend (SeaweedFS in CI), since `object_store`'s S3 and
   local filesystem backends differ in conditional-put semantics — exactly
