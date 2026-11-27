@@ -11,6 +11,12 @@ use delta_txn_service::config::grpc::{check_security, load_grpc_config};
 use delta_txn_service::grpc::server::DeltaTxnGrpcServer;
 use delta_txn_service::telemetry::tracing::init_tracing;
 
+// Static musl builds (the Docker image) only: musl's allocator serializes
+// heavily under concurrent allocation. See Cargo.toml.
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// Resolves on SIGTERM (what Kubernetes/Docker send on every rolling
 /// deploy) or Ctrl+C/SIGINT, whichever arrives first. `serve` then stops
 /// accepting new connections and lets in-flight RPCs finish, so clients

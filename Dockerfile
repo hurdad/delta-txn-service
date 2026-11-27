@@ -1,27 +1,38 @@
 # ======================================================
 # Builder
 # ======================================================
-# Pinned to the exact toolchain CI uses (dtolnay/rust-toolchain@1.94.1) and
-# Cargo.toml's rust-version, so the image and CI build the same way.
-FROM rust:1.94.1-trixie AS builder
+# Pinned to the exact toolchain CI uses (dtolnay/rust-toolchain@1.100.0),
+# rust-toolchain.toml and Cargo.toml's rust-version, so the image and CI
+# build the same way.
+FROM rust:1.100.0-trixie AS builder
 
 WORKDIR /build
 
-# protoc for tonic-prost-build. No OpenSSL: TLS is rustls throughout
-# (nothing in Cargo.lock depends on openssl-sys).
+# protoc for tonic-prost-build; musl-tools (musl-gcc) for the C parts of
+# the dependency graph (ring, aws-lc-sys, mimalloc). No OpenSSL: TLS is
+# rustls throughout (nothing in Cargo.lock depends on openssl-sys).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-compiler \
+    musl-tools \
     && rm -rf /var/lib/apt/lists/*
+
+# Fully static binary (musl), so the runtime image needs no libc at all
+# and can be distroless/static. Derived from the build platform so an
+# arm64 build picks aarch64-unknown-linux-musl. musl's own malloc is slow
+# under multithreaded load, so musl builds use mimalloc (see main.rs).
+RUN uname -m > /tmp/arch \
+    && echo "$(cat /tmp/arch)-unknown-linux-musl" > /build/.target \
+    && rustup target add "$(cat /build/.target)"
 
 # Pre-build dependency layer for caching
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && echo "fn main() {}" > src/main.rs
-RUN cargo build --release --locked
+RUN cargo build --release --locked --target "$(cat .target)"
 # Warms the release-test-profile dependency build too (see Cargo.toml's
 # [profile.release-test] comment) -- `cargo test` below uses that profile,
 # and without this it would recompile the whole dependency graph from
 # scratch under a differently-cached profile on every source change.
-RUN cargo test --profile release-test --locked --no-run
+RUN cargo test --profile release-test --locked --target "$(cat .target)" --no-run
 RUN rm -rf src
 
 # Copy real source
@@ -37,35 +48,32 @@ COPY tests ./tests
 # Build the real binary. COPY keeps the source files' original mtimes, which
 # can be older than the dummy build above; touching them makes sure cargo
 # rebuilds this crate instead of treating the dummy artifacts as fresh.
-RUN touch build.rs src/main.rs src/lib.rs && cargo build --release --locked
-# Run tests to validate the build artifacts. Uses the release-test profile
+RUN touch build.rs src/main.rs src/lib.rs \
+    && cargo build --release --locked --target "$(cat .target)" \
+    && cp "target/$(cat .target)/release/delta-txn-service" /build/delta-txn-service
+# Run tests against the musl build. Uses the release-test profile
 # (Cargo.toml), not --release directly -- see that profile's comment: fat
 # LTO + codegen-units=1 against test binaries, on top of the
 # deltalake/arrow/parquet dependency graph, is enough peak memory during
 # linking to OOM a Docker build.
-RUN cargo test --profile release-test --locked
+RUN cargo test --profile release-test --locked --target "$(cat .target)"
+# Fail the build if the binary isn't actually static.
+RUN file /build/delta-txn-service | grep -Eq "static(ally|-pie) linked"
 
 
 # ======================================================
 # Runtime
 # ======================================================
-FROM debian:trixie-slim
+# Distroless "static": CA certificates, tzdata and /etc/passwd basics, and
+# nothing else -- no libc, no libssl, no shell, no package manager. The
+# binary is fully static and TLS is rustls, so nothing more is needed.
+# debian:trixie-slim had ~220 OS-package CVEs (53 HIGH) from tools the
+# service never runs; this base had none when it was adopted. No shell
+# means `docker exec ... sh` won't work; use an ephemeral debug container
+# (kubectl debug) instead.
+FROM gcr.io/distroless/static-debian13:nonroot
 
-WORKDIR /app
-
-# Runtime deps only: CA roots for rustls' platform verifier.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/* \
-    && groupadd --system --gid 10001 delta-txn \
-    && useradd --system --no-create-home --uid 10001 --gid 10001 delta-txn
-
-# ---- IMPORTANT ----
-# Adjust the binary name here if you rename the crate
-# Default assumes:
-#   [package]
-#   name = "delta-txn-service"
-COPY --from=builder /build/target/release/delta-txn-service /usr/local/bin/delta-txn-service
+COPY --from=builder /build/delta-txn-service /usr/local/bin/delta-txn-service
 
 EXPOSE 50051
 
@@ -74,8 +82,9 @@ EXPOSE 50051
 ENV RUST_LOG=info \
     AWS_REGION=us-east-1
 
-# Numeric, so Kubernetes can verify runAsNonRoot without the pod spec
-# having to set runAsUser.
+# Numeric, so Kubernetes can verify runAsNonRoot; matches the Helm chart's
+# runAsUser/runAsGroup (10001) rather than distroless's own nonroot (65532).
+# No passwd entry is needed for a numeric user.
 USER 10001:10001
 
 ENTRYPOINT ["/usr/local/bin/delta-txn-service"]
