@@ -330,3 +330,42 @@ async fn snapshot_cache_hits_and_stays_current_on_s3() {
     let (table, second) = cache.latest_with_result(&url, storage_opts).await.unwrap();
     assert_eq!((table.version(), second), (Some(1), LookupResult::Hit));
 }
+
+/// GetHistory reads commit files through the table-scoped object store,
+/// whose rooting differs per backend; check it on S3 too.
+#[tokio::test]
+async fn get_history_lists_commits_on_s3() {
+    let (storage_opts, table_uri) = skip_unless_s3_configured!("history");
+    let server = start_server(storage_opts).await;
+    let mut client = server.connect().await;
+    client
+        .commit(commit_request(
+            &table_uri,
+            None,
+            create_table_actions("orders"),
+        ))
+        .await
+        .expect("create commit should succeed");
+    client
+        .commit(commit_request(
+            &table_uri,
+            Some(0),
+            vec![add_file_action("a.parquet", 1)],
+        ))
+        .await
+        .expect("append should succeed");
+
+    let page = client
+        .get_history(pb::GetHistoryRequest {
+            table_uri: table_uri.clone(),
+            limit: None,
+            before_version: None,
+        })
+        .await
+        .expect("GetHistory")
+        .into_inner();
+    let versions: Vec<i64> = page.commits.iter().map(|c| c.version).collect();
+    assert_eq!(versions, vec![1, 0]);
+    assert_eq!(page.commits[0].num_add_files, 1);
+    assert_eq!(page.commits[1].operation, "CREATE TABLE");
+}

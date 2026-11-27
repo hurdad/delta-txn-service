@@ -24,9 +24,12 @@ use crate::delta::{
     cache::{snapshot_cache_from_env, SnapshotCache},
     commit::{commit_actions, create_table, find_metadata, find_protocol},
     features,
+    history::{read_history, DEFAULT_HISTORY_LIMIT, MAX_HISTORY_LIMIT},
     table::{open_table_at, table_exists, ReadAt},
 };
-use crate::grpc::mapping::{map_actions, map_active_file_to_pb, map_protocol_to_pb};
+use crate::grpc::mapping::{
+    map_actions, map_active_file_to_pb, map_history_entry, map_protocol_to_pb,
+};
 use crate::locking::table_lock::TableLockManager;
 use crate::telemetry::commit_metrics::{CommitMetrics, CommitOutcome};
 
@@ -683,6 +686,55 @@ impl DeltaTxnService for DeltaTxnGrpcServer {
             metadata: Some(metadata),
             protocol: Some(protocol),
             app_transaction_version,
+        }))
+    }
+
+    async fn get_history(
+        &self,
+        req: Request<GetHistoryRequest>,
+    ) -> Result<Response<GetHistoryResponse>, Status> {
+        let r = req.into_inner();
+        let normalized_table_uri = self.normalize_and_check_table_uri(&r.table_uri)?;
+        let limit = match r.limit {
+            None => DEFAULT_HISTORY_LIMIT,
+            Some(n) if n >= 1 && n as usize <= MAX_HISTORY_LIMIT => n as usize,
+            Some(n) => {
+                return Err(Status::invalid_argument(format!(
+                    "limit {n} must be between 1 and {MAX_HISTORY_LIMIT}"
+                )))
+            }
+        };
+        let before_version = match r.before_version {
+            None => None,
+            Some(v) if v >= 0 => Some(v as u64),
+            Some(v) => {
+                return Err(Status::invalid_argument(format!(
+                    "before_version {v} must not be negative"
+                )))
+            }
+        };
+
+        if !table_exists(&normalized_table_uri, self.storage_opts.clone())
+            .await
+            .map_err(Status::from)?
+        {
+            return Err(Status::not_found(format!(
+                "table_uri '{normalized_table_uri}' does not exist"
+            )));
+        }
+        let table = self
+            .snapshots
+            .latest(&normalized_table_uri, self.storage_opts.clone())
+            .await
+            .map_err(Status::from)?;
+        let page = read_history(&table, limit, before_version)
+            .await
+            .map_err(Status::from)?;
+
+        Ok(Response::new(GetHistoryResponse {
+            commits: page.entries.into_iter().map(map_history_entry).collect(),
+            latest_version: page.latest_version as i64,
+            next_before_version: page.next_before_version.map(|v| v as i64),
         }))
     }
 

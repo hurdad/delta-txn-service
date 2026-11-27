@@ -34,6 +34,12 @@ service DeltaTxnService {
   // list incrementally instead. See ListActiveFilesResponse's own comment
   // for the exact framing.
   rpc ListActiveFiles(ListActiveFilesRequest) returns (stream ListActiveFilesResponse);
+
+  // Unary: the table's commit history, newest first, one entry per
+  // version -- what `DESCRIBE HISTORY` shows. Paged: pass the response's
+  // next_before_version back as before_version for older commits. Like
+  // the other reads, takes no lock.
+  rpc GetHistory(GetHistoryRequest) returns (GetHistoryResponse);
 }
 
 // ======================================================
@@ -400,6 +406,62 @@ message TableMetadata {
 }
 
 // ======================================================
+// Commit history
+// ======================================================
+
+message GetHistoryRequest {
+  // Same meaning/validation as GetTableRequest.table_uri.
+  string table_uri = 1;
+  // Most entries to return: default 100, at most 1000 (INVALID_ARGUMENT
+  // above that, or if not positive).
+  optional int32 limit = 2;
+  // Only versions older than this (exclusive); unset starts at the latest.
+  // More than the latest version plus one is NOT_FOUND.
+  optional int64 before_version = 3;
+}
+
+message GetHistoryResponse {
+  // Newest first, consecutive versions.
+  repeated CommitHistoryEntry commits = 1;
+  int64 latest_version = 2;
+  // Set when older commits remain: the before_version for the next page.
+  // Unset once the page reaches version 0, or the oldest commit file the
+  // log still holds (log retention may have removed older ones).
+  optional int64 next_before_version = 3;
+}
+
+// One table version. Every field except version, timestamp_ms and the
+// file counts comes from the commit's commitInfo action, and is empty
+// when the commit has none (has_commit_info false).
+message CommitHistoryEntry {
+  int64 version = 1;
+  // Milliseconds since the Unix epoch: the in-commit timestamp if the
+  // table has them, else commitInfo.timestamp, else the commit file's
+  // last-modified time.
+  int64 timestamp_ms = 2;
+  bool has_commit_info = 3;
+  // As written by the committing engine, e.g. "WRITE", "MERGE", "OPTIMIZE".
+  string operation = 4;
+  // commitInfo.operationParameters and .operationMetrics. String values
+  // as-is; any other JSON value as its JSON text.
+  map<string, string> operation_parameters = 5;
+  map<string, string> operation_metrics = 6;
+  optional int64 read_version = 7;
+  // e.g. "Serializable", "WriteSerializable", "SnapshotIsolation".
+  string isolation_level = 8;
+  optional bool is_blind_append = 9;
+  string engine_info = 10;
+  // commitInfo.userMetadata: one opaque string (for commits made through
+  // this service, the JSON of CommitInfo.user_metadata).
+  string user_metadata = 11;
+  string user_id = 12;
+  string user_name = 13;
+  // add / remove actions in this commit.
+  int64 num_add_files = 14;
+  int64 num_remove_files = 15;
+}
+
+// ======================================================
 // CommitInfo
 // ======================================================
 
@@ -432,8 +494,9 @@ message CommitInfo {
   // grpc::mapping::map_user_metadata.
   map<string, string> user_metadata = 5;
 
-  // Milliseconds since the Unix epoch. 0 is treated as "not set", same
-  // convention as TableMetadata.created_time above.
+  // Milliseconds since the Unix epoch. 0 (unset) records the server's
+  // current time, as delta-rs does for the commitInfo it writes when a
+  // Commit carries none.
   int64 timestamp = 6;
 }
 

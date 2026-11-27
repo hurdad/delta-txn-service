@@ -1383,6 +1383,7 @@ dependencies = [
  "chrono",
  "dashmap",
  "deltalake",
+ "futures",
  "http-body",
  "mimalloc",
  "opentelemetry",

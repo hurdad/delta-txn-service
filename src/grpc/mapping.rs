@@ -532,11 +532,14 @@ fn map_commit_info(commit_info: pb::CommitInfo) -> Result<CommitInfo, String> {
     let operation_parameters = map_json_map(commit_info.operation_parameters);
     let user_metadata = map_user_metadata(commit_info.user_metadata)?;
     let engine_info = map_engine_info(commit_info.engine_name, commit_info.engine_version);
-    let timestamp = if commit_info.timestamp == 0 {
-        None
+    // delta-rs only timestamps a commitInfo it writes itself, so an unset
+    // client timestamp would leave the log entry with none (history then
+    // falls back to the file's modification time, other tools may not).
+    let timestamp = Some(if commit_info.timestamp == 0 {
+        chrono::Utc::now().timestamp_millis()
     } else {
-        Some(commit_info.timestamp)
-    };
+        commit_info.timestamp
+    });
 
     Ok(CommitInfo {
         timestamp,
@@ -622,6 +625,58 @@ fn map_commit_operation(operation: i32) -> Option<String> {
     }
 }
 
+/// delta::history entry -> wire CommitHistoryEntry (GetHistory).
+pub fn map_history_entry(entry: crate::delta::history::HistoryEntry) -> pb::CommitHistoryEntry {
+    // String values as-is; other JSON values as their JSON text.
+    fn string_map<'a>(
+        map: impl IntoIterator<Item = (&'a String, &'a Value)>,
+    ) -> std::collections::HashMap<String, String> {
+        map.into_iter()
+            .map(|(k, v)| {
+                let v = match v {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                (k.clone(), v)
+            })
+            .collect()
+    }
+
+    let mut out = pb::CommitHistoryEntry {
+        version: entry.version as i64,
+        timestamp_ms: entry.timestamp_ms,
+        has_commit_info: entry.commit_info.is_some(),
+        num_add_files: entry.num_add_files as i64,
+        num_remove_files: entry.num_remove_files as i64,
+        ..Default::default()
+    };
+    if let Some(info) = entry.commit_info {
+        out.operation = info.operation.unwrap_or_default();
+        out.operation_parameters = info
+            .operation_parameters
+            .as_ref()
+            .map(|p| string_map(p.iter()))
+            .unwrap_or_default();
+        out.operation_metrics = info
+            .info
+            .get("operationMetrics")
+            .and_then(Value::as_object)
+            .map(|m| string_map(m.iter()))
+            .unwrap_or_default();
+        out.read_version = info.read_version.map(|v| v as i64);
+        out.isolation_level = info
+            .isolation_level
+            .map(|l| l.as_ref().to_string())
+            .unwrap_or_default();
+        out.is_blind_append = info.is_blind_append;
+        out.engine_info = info.engine_info.unwrap_or_default();
+        out.user_metadata = info.user_metadata.unwrap_or_default();
+        out.user_id = info.user_id.unwrap_or_default();
+        out.user_name = info.user_name.unwrap_or_default();
+    }
+    out
+}
+
 #[cfg(test)]
 #[path = "mapping_proptests.rs"]
 mod proptests;
@@ -629,6 +684,34 @@ mod proptests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Spark-style commitInfo: fields delta-rs never writes itself.
+    #[test]
+    fn map_history_entry_carries_spark_commit_info() {
+        let commit = br#"{"commitInfo":{"timestamp":1700000000000,"userId":"42","userName":"ana","operation":"MERGE","operationParameters":{"predicate":"[\"(id = id)\"]","matchedPredicates":[{"actionType":"update"}]},"readVersion":9,"isolationLevel":"WriteSerializable","isBlindAppend":false,"operationMetrics":{"numTargetRowsUpdated":"3","numOutputRows":"10"},"engineInfo":"Apache-Spark/3.5.1 Delta-Lake/3.2.0"}}
+{"remove":{"path":"old.parquet","dataChange":true}}
+{"add":{"path":"new.parquet","partitionValues":{},"size":1,"modificationTime":1,"dataChange":true}}"#;
+        let entry = map_history_entry(crate::delta::history::parse_commit(10, commit).unwrap());
+        assert_eq!(entry.version, 10);
+        assert_eq!(entry.timestamp_ms, 1_700_000_000_000);
+        assert!(entry.has_commit_info);
+        assert_eq!(entry.operation, "MERGE");
+        assert_eq!(entry.operation_parameters["predicate"], "[\"(id = id)\"]");
+        assert_eq!(
+            entry.operation_parameters["matchedPredicates"],
+            r#"[{"actionType":"update"}]"#
+        );
+        assert_eq!(entry.operation_metrics["numTargetRowsUpdated"], "3");
+        assert_eq!(entry.read_version, Some(9));
+        assert_eq!(entry.isolation_level, "WriteSerializable");
+        assert_eq!(entry.is_blind_append, Some(false));
+        assert_eq!(entry.engine_info, "Apache-Spark/3.5.1 Delta-Lake/3.2.0");
+        assert_eq!(
+            (entry.user_id.as_str(), entry.user_name.as_str()),
+            ("42", "ana")
+        );
+        assert_eq!((entry.num_add_files, entry.num_remove_files), (1, 1));
+    }
     use std::collections::HashMap;
 
     #[test]

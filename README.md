@@ -43,6 +43,7 @@ This project provides:
 ✅ Time travel: `GetTable` / `ListActiveFiles` at a past version or timestamp  
 ✅ Commits atomically using `delta-rs`  
 ✅ Streams a table's currently-active file list (`ListActiveFiles`) for readers  
+✅ Commit history (`GetHistory`), one entry per version, paged  
 ✅ Exposes a stable gRPC API
 
 ---
@@ -125,6 +126,15 @@ no interaction with `Commit`'s optimistic-concurrency machinery. Supports the sa
 `timestamp_ms` time travel. Each file carries its deletion vector, if any: readers must apply it,
 since the data file still contains the deleted rows.
 
+### `GetHistory`
+A table's commit history, newest first, one entry per version: operation, its parameters and
+metrics, engine, user metadata, timestamp, and how many files the commit added and removed —
+what `DESCRIBE HISTORY` shows. Up to `limit` entries (default 100, at most 1000); pass the
+response's `next_before_version` back as `before_version` for the next, older page. History ends
+at the oldest commit file the log still holds (another writer's log retention may have removed
+older ones). Fields like `read_version` and `isolation_level` are filled in only for commits from
+writers that record them (Spark does; delta-rs doesn't). A plain read, like `GetTable`.
+
 ---
 
 ## Protobuf
@@ -176,8 +186,8 @@ AWS_ALLOW_HTTP=true
 - `DELTA_TXN_GRPC_API_KEYS`: Optional comma-separated `name=key` list of accepted keys. The matched key's name is
   recorded as the `client` field on the request's trace span. To rotate a key, list the old and new key, move
   clients over, then remove the old one.
-- `DELTA_TXN_ALLOWED_TABLE_PREFIXES`: Optional comma-separated list of `table_uri` prefixes. When set, `Commit`,
-  `GetTable`, and `ListActiveFiles` all reject any `table_uri` that doesn't start with one of these prefixes. When
+- `DELTA_TXN_ALLOWED_TABLE_PREFIXES`: Optional comma-separated list of `table_uri` prefixes. When set, every RPC
+  (`Commit`, `GetTable`, `ListActiveFiles`, `GetHistory`) rejects any `table_uri` that doesn't start with one of these prefixes. When
   unset (the default), a client may address any table URI the server's storage credentials can reach — set this in
   any deployment where the API key/network boundary isn't trusted to scope table access on its own.
 - `DELTA_TXN_ALLOW_INSECURE`: The service refuses to start with neither an API key nor a table allowlist.

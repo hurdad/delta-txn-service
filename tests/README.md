@@ -59,6 +59,10 @@ pointed at a real S3-compatible backend.
   protocol table features and deletion-vector pass-through, and
   rejection of file paths that escape the table root, and partition
   values round-tripping through `ListActiveFiles`.
+- **`e2e_history.rs`** — `GetHistory`: entry contents (operation,
+  engine, user metadata, file counts, the server-stamped timestamp),
+  paging through every version exactly once, argument validation, the
+  allowlist, and history that ends where log retention removed commits.
 - **`e2e_snapshot_cache.rs`** — the per-replica snapshot cache
   (`delta::cache`): cached reads and commits stay current with this
   server's commits and with another replica's; a deleted-and-recreated

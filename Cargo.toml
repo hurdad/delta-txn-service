@@ -59,6 +59,9 @@ url = "2.5.9"
 # Converts GetTable/ListActiveFiles `timestamp_ms` into the DateTime
 # delta-rs time travel takes. Already in the tree via deltalake.
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }
+# Concurrent commit-file reads for GetHistory (delta::history). Already in
+# the tree via deltalake.
+futures = "0.3.34"
 
 # -----------------------------
 # Concurrency / locking
