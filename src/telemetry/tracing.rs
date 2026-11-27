@@ -62,13 +62,13 @@ pub fn init_tracing() -> TelemetryGuard {
             .with_attributes([KeyValue::new("service.name", service_name)])
             .build();
 
-        let protocol = otel_protocol();
-        let tracer = build_tracer(protocol, resource.clone(), &mut guard);
+        warn_if_non_grpc_protocol();
+        let tracer = build_tracer(resource.clone(), &mut guard);
         let otel_layer = tracer
             .as_ref()
             .map(|tracer| tracing_opentelemetry::layer().with_tracer(tracer.clone()));
 
-        let meter_provider = build_meter_provider(protocol, resource);
+        let meter_provider = build_meter_provider(resource);
 
         if let Some(provider) = meter_provider.clone() {
             global::set_meter_provider(provider.clone());
@@ -110,7 +110,7 @@ fn log_exporter_build_error(signal: &str, protocol_label: &str, error: impl std:
     );
 }
 
-/// Builds the OTLP span exporter for `protocol` and wraps it in a real
+/// Builds the OTLP gRPC span exporter and wraps it in a real
 /// SdkTracerProvider, registering it as the process-global tracer provider
 /// (`global::set_tracer_provider`) and stashing it in `guard` so it gets
 /// shut down/flushed at process exit. A construction failure logs via
@@ -118,32 +118,15 @@ fn log_exporter_build_error(signal: &str, protocol_label: &str, error: impl std:
 /// returns `None`, same as before -- init_tracing() falls back to no OTel
 /// layer at all, but now with an operator-visible reason why.
 fn build_tracer(
-    protocol: Protocol,
     resource: Resource,
     guard: &mut TelemetryGuard,
 ) -> Option<opentelemetry_sdk::trace::Tracer> {
-    let exporter = match protocol {
-        Protocol::HttpBinary => opentelemetry_otlp::SpanExporter::builder()
-            .with_http()
-            .with_protocol(Protocol::HttpBinary)
-            .build()
-            .map_err(|e| log_exporter_build_error("trace", "http/protobuf", e))
-            .ok(),
-        Protocol::HttpJson => opentelemetry_otlp::SpanExporter::builder()
-            .with_http()
-            .with_protocol(Protocol::HttpJson)
-            .build()
-            .map_err(|e| log_exporter_build_error("trace", "http/json", e))
-            .ok(),
-        // `Protocol` is #[non_exhaustive]; otel_protocol() only ever returns
-        // the three known variants, and gRPC is its default/fallback anyway.
-        _ => opentelemetry_otlp::SpanExporter::builder()
-            .with_tonic()
-            .with_protocol(Protocol::Grpc)
-            .build()
-            .map_err(|e| log_exporter_build_error("trace", "grpc", e))
-            .ok(),
-    };
+    let exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_tonic()
+        .with_protocol(Protocol::Grpc)
+        .build()
+        .map_err(|e| log_exporter_build_error("trace", "grpc", e))
+        .ok();
 
     exporter.map(|exporter| {
         let provider = SdkTracerProvider::builder()
@@ -163,29 +146,13 @@ fn build_tracer(
 /// process-global meter provider by init_tracing() itself (not here), since
 /// GrpcMetricsLayer's own `global::meter("delta-txn-service")` call
 /// (main.rs) needs that to have already happened.
-fn build_meter_provider(protocol: Protocol, resource: Resource) -> Option<SdkMeterProvider> {
-    let exporter = match protocol {
-        Protocol::HttpBinary => opentelemetry_otlp::MetricExporter::builder()
-            .with_http()
-            .with_protocol(Protocol::HttpBinary)
-            .build()
-            .map_err(|e| log_exporter_build_error("metric", "http/protobuf", e))
-            .ok(),
-        Protocol::HttpJson => opentelemetry_otlp::MetricExporter::builder()
-            .with_http()
-            .with_protocol(Protocol::HttpJson)
-            .build()
-            .map_err(|e| log_exporter_build_error("metric", "http/json", e))
-            .ok(),
-        // `Protocol` is #[non_exhaustive]; otel_protocol() only ever returns
-        // the three known variants, and gRPC is its default/fallback anyway.
-        _ => opentelemetry_otlp::MetricExporter::builder()
-            .with_tonic()
-            .with_protocol(Protocol::Grpc)
-            .build()
-            .map_err(|e| log_exporter_build_error("metric", "grpc", e))
-            .ok(),
-    };
+fn build_meter_provider(resource: Resource) -> Option<SdkMeterProvider> {
+    let exporter = opentelemetry_otlp::MetricExporter::builder()
+        .with_tonic()
+        .with_protocol(Protocol::Grpc)
+        .build()
+        .map_err(|e| log_exporter_build_error("metric", "grpc", e))
+        .ok();
 
     exporter.map(|exporter| {
         SdkMeterProvider::builder()
@@ -195,23 +162,22 @@ fn build_meter_provider(protocol: Protocol, resource: Resource) -> Option<SdkMet
     })
 }
 
-/// Reads OTEL_EXPORTER_OTLP_PROTOCOL, defaulting to (and falling back to,
-/// for any unrecognized value) gRPC -- a deliberate choice, not an
-/// arbitrary one: this service already speaks gRPC for its own primary
-/// API, so exporting telemetry the same way avoids adding an HTTP
-/// dependency (and a second port/endpoint shape to operate) purely for
-/// observability. See README.md's "Configuration" section for the
-/// documented env var list this reads.
-fn otel_protocol() -> Protocol {
-    let protocol = env::var("OTEL_EXPORTER_OTLP_PROTOCOL")
-        .unwrap_or_else(|_| "grpc".to_string())
-        .to_lowercase();
-
-    match protocol.as_str() {
-        "grpc" => Protocol::Grpc,
-        "http/protobuf" | "http-protobuf" | "http" => Protocol::HttpBinary,
-        "http/json" | "http-json" => Protocol::HttpJson,
-        _ => Protocol::Grpc,
+/// Only gRPC OTLP export is compiled in (opentelemetry-otlp's `http-*`
+/// features are deliberately off): this service already speaks gRPC for its
+/// own primary API, so exporting telemetry the same way avoids pulling in an
+/// HTTP client stack purely for observability. OTEL_EXPORTER_OTLP_PROTOCOL
+/// is therefore not honored; if it's set to anything other than `grpc`, warn
+/// on stderr (same reasoning as log_exporter_build_error() -- the subscriber
+/// isn't installed yet) rather than silently sending gRPC to what is likely
+/// an HTTP collector port (4318).
+fn warn_if_non_grpc_protocol() {
+    if let Ok(protocol) = env::var("OTEL_EXPORTER_OTLP_PROTOCOL") {
+        if !protocol.eq_ignore_ascii_case("grpc") {
+            eprintln!(
+                "delta-txn-service: OTEL_EXPORTER_OTLP_PROTOCOL={protocol} is not supported \
+                 (this build exports OTLP over gRPC only) -- using grpc"
+            );
+        }
     }
 }
 
