@@ -111,7 +111,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       # Shares the same GitHub Actions cache scope as docker-publish.yml's
       # own build (cache-from/cache-to: type=gha is keyed by repo, not by
       # workflow), so a PR build warms the cache the post-merge publish
