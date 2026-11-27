@@ -1,0 +1,13 @@
+# cargo-nextest config. The `ci` profile is what .github/workflows/coverage.yml
+# runs under `cargo llvm-cov nextest`: it writes JUnit XML (consumed by
+# Codecov Test Analytics) and runs every test even after a failure, so one CI
+# run reports all failing tests rather than stopping at the first.
+#
+# Local `cargo test` is unaffected -- nextest is only used in CI.
+
+[profile.ci]
+fail-fast = false
+
+[profile.ci.junit]
+# Relative to <target-dir>/nextest/ci/.
+path = "junit.xml"

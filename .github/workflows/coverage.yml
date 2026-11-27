@@ -1,0 +1,74 @@
+name: Coverage
+
+# Code coverage + test results, uploaded to Codecov
+# (https://app.codecov.io/gh/hurdad/delta-txn-service).
+#
+# Its own workflow rather than a job in ci.yml because it must also run on
+# push to main: Codecov compares each PR's coverage against the base
+# branch's latest upload, so main needs uploads of its own. ci.yml is
+# deliberately pull_request-only (see its header comment).
+#
+# Runs the unit tests (src/) and the file://-backed integration suite
+# (tests/) under cargo-llvm-cov, via cargo-nextest so the same run also
+# emits JUnit XML for Codecov Test Analytics (.config/nextest.toml's `ci`
+# profile). tests/e2e_minio.rs no-ops here (no MinIO; ci.yml's
+# minio-integration-tests job covers it), so S3-specific paths aren't
+# counted -- the commit/conflict logic they exercise is the same code the
+# file:// suite already covers.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coverage-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.94.1
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov and cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov,cargo-nextest
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # Same native deps as ci.yml's minio-integration-tests job / the
+      # Dockerfile's builder stage.
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler pkg-config libssl-dev
+
+      - name: Run tests with coverage
+        run: cargo llvm-cov nextest --profile ci --locked --codecov --output-path codecov.json
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: codecov.json
+          fail_ci_if_error: true
+
+      # !cancelled(): runs even when tests failed -- failing tests are exactly
+      # the results worth reporting.
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          report_type: test_results
+          files: target/llvm-cov-target/nextest/ci/junit.xml
+          fail_ci_if_error: true
