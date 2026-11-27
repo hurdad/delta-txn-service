@@ -42,6 +42,7 @@ async fn concurrent_writers_each_land_their_own_file_with_no_lost_updates() {
                 let current_version = client
                     .get_table(pb::GetTableRequest {
                         table_uri: table_uri.to_string(),
+                        ..Default::default()
                     })
                     .await
                     .expect("GetTable should succeed")
@@ -72,6 +73,7 @@ async fn concurrent_writers_each_land_their_own_file_with_no_lost_updates() {
     let final_version = client
         .get_table(pb::GetTableRequest {
             table_uri: table_uri.to_string(),
+            ..Default::default()
         })
         .await
         .expect("final GetTable should succeed")
@@ -86,6 +88,7 @@ async fn concurrent_writers_each_land_their_own_file_with_no_lost_updates() {
     let mut stream = client
         .list_active_files(pb::ListActiveFilesRequest {
             table_uri: table_uri.to_string(),
+            ..Default::default()
         })
         .await
         .expect("ListActiveFiles should succeed")

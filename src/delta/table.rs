@@ -1,6 +1,7 @@
 use super::errors::DeltaTxnError;
+use chrono::{DateTime, Utc};
 use deltalake::logstore::LogStore;
-use deltalake::{DeltaTable, DeltaTableBuilder};
+use deltalake::{DeltaTable, DeltaTableBuilder, DeltaTableError};
 use std::collections::HashMap;
 use url::Url;
 
@@ -24,6 +25,91 @@ pub async fn open_table(
     deltalake::open_table_with_storage_options(table_url.clone(), storage_options)
         .await
         .map_err(|e| DeltaTxnError::OpenFailed(e.to_string()))
+}
+
+/// Which state of a table a read RPC should see (GetTable /
+/// ListActiveFiles time travel).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadAt {
+    Latest,
+    Version(u64),
+    /// The latest version committed at or before this instant.
+    Timestamp(DateTime<Utc>),
+}
+
+/// Like `open_table`, but at a specific version or timestamp. A version
+/// or timestamp the log can't satisfy becomes
+/// `DeltaTxnError::VersionNotFound` (gRPC NOT_FOUND) rather than an
+/// opaque internal error, so a client can tell a bad request from a
+/// storage failure.
+///
+/// delta-rs reports "version newer than the log" as a generic kernel error
+/// string, so a requested version is checked against the log's latest
+/// version first (a cheap `_delta_log` listing, no snapshot load). A
+/// version at or below the latest that still fails to load has been
+/// cleaned out of the log (log retention), which is also NOT_FOUND.
+pub async fn open_table_at(
+    table_url: &Url,
+    storage_options: HashMap<String, String>,
+    at: ReadAt,
+) -> Result<DeltaTable, DeltaTxnError> {
+    if at == ReadAt::Latest {
+        return open_table(table_url, storage_options).await;
+    }
+    // build() does no I/O; the load_* calls below do the actual read.
+    let mut table = DeltaTableBuilder::from_url(table_url.clone())
+        .map_err(|e| DeltaTxnError::OpenFailed(e.to_string()))?
+        .with_storage_options(storage_options)
+        .build()
+        .map_err(|e| DeltaTxnError::OpenFailed(e.to_string()))?;
+
+    match at {
+        ReadAt::Latest => unreachable!("handled above"),
+        ReadAt::Version(v) => {
+            let latest = table
+                .log_store()
+                .get_latest_version(0)
+                .await
+                .map_err(|e| DeltaTxnError::OpenFailed(e.to_string()))?;
+            if v > latest {
+                return Err(DeltaTxnError::VersionNotFound(format!(
+                    "version {v} does not exist (latest is {latest})"
+                )));
+            }
+            table.load_version(v).await.map_err(|e| {
+                tracing::warn!(error = %e, version = v, "time-travel load failed");
+                DeltaTxnError::VersionNotFound(format!(
+                    "version {v} is no longer available in the table's log"
+                ))
+            })?;
+        }
+        ReadAt::Timestamp(ts) => {
+            let not_found = || {
+                DeltaTxnError::VersionNotFound(format!(
+                    "no table version at or before {}",
+                    ts.to_rfc3339()
+                ))
+            };
+            table.load_with_datetime(ts).await.map_err(|e| match e {
+                DeltaTableError::InvalidVersion(_)
+                | DeltaTableError::NotATable(_)
+                | DeltaTableError::InvalidDateTimeString { .. } => not_found(),
+                other => DeltaTxnError::OpenFailed(other.to_string()),
+            })?;
+            // delta-rs clamps a timestamp before the first commit to the
+            // oldest version; Delta (Spark) treats that as "no version
+            // existed yet", and so does this service.
+            let loaded = table.version().unwrap_or(0);
+            let committed_at = table
+                .snapshot()
+                .ok()
+                .and_then(|snapshot| snapshot.version_timestamp(loaded));
+            if committed_at.is_some_and(|t| t > ts.timestamp_millis()) {
+                return Err(not_found());
+            }
+        }
+    }
+    Ok(table)
 }
 
 /// Checks whether `table_uri` already has an initialized Delta log

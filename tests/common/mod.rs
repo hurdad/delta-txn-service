@@ -35,6 +35,9 @@ use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::{Channel, Server};
 
+/// The generated gRPC client type every test uses.
+pub type Client = DeltaTxnServiceClient<Channel>;
+
 /// What to configure the server under test with -- everything defaults to
 /// "off" (no auth, no allowlist, no object-store credentials), matching an
 /// operator who hasn't set any of the corresponding env vars. Individual
@@ -181,6 +184,7 @@ pub fn sample_protocol() -> pb::Protocol {
     pb::Protocol {
         min_reader_version: 1,
         min_writer_version: 2,
+        ..Default::default()
     }
 }
 
@@ -243,6 +247,7 @@ pub fn add_file_action(path: &str, num_records: i64) -> pb::Action {
                 columns,
             }),
             tags: HashMap::new(),
+            deletion_vector: None,
         })),
     }
 }
@@ -253,6 +258,7 @@ pub fn remove_file_action(path: &str) -> pb::Action {
             path: path.to_string(),
             deletion_timestamp: Some(1_700_000_002_000),
             data_change: pb::DataChange::True as i32,
+            ..Default::default()
         })),
     }
 }

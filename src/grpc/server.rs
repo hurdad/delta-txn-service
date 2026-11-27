@@ -22,9 +22,9 @@ use crate::config::storage::{
 use crate::delta::errors::DeltaTxnError;
 use crate::delta::{
     commit::{commit_actions, create_table, find_metadata, find_protocol},
-    table::{open_table, table_exists},
+    table::{open_table, open_table_at, table_exists, ReadAt},
 };
-use crate::grpc::mapping::{map_actions, map_active_file_to_pb};
+use crate::grpc::mapping::{map_actions, map_active_file_to_pb, map_protocol_to_pb};
 use crate::locking::table_lock::TableLockManager;
 
 // How many files each ListActiveFilesBatch message carries. Large enough
@@ -160,6 +160,25 @@ impl DeltaTxnGrpcServer {
     }
 }
 
+/// Turns a read request's optional time-travel fields into a ReadAt.
+/// Setting both is ambiguous, and negative values can't name a version or
+/// a representable instant, so all of those are INVALID_ARGUMENT.
+fn parse_read_at(version: Option<i64>, timestamp_ms: Option<i64>) -> Result<ReadAt, Status> {
+    match (version, timestamp_ms) {
+        (Some(_), Some(_)) => Err(Status::invalid_argument(
+            "set at most one of version and timestamp_ms",
+        )),
+        (Some(v), None) => u64::try_from(v)
+            .map(ReadAt::Version)
+            .map_err(|_| Status::invalid_argument("version must be >= 0")),
+        (None, Some(ms)) => chrono::DateTime::from_timestamp_millis(ms)
+            .filter(|_| ms >= 0)
+            .map(ReadAt::Timestamp)
+            .ok_or_else(|| Status::invalid_argument("timestamp_ms must be a valid time >= 0")),
+        (None, None) => Ok(ReadAt::Latest),
+    }
+}
+
 // Shared by get_table() and list_active_files()'s header: converts a
 // loaded snapshot's metadata/protocol into their wire form, including the
 // schema_string parse-and-reserialize step both need identically.
@@ -192,10 +211,7 @@ fn build_metadata_and_protocol(
             configuration: metadata.configuration().clone(),
             created_time: metadata.created_time().unwrap_or_default(),
         },
-        Protocol {
-            min_reader_version: protocol.min_reader_version(),
-            min_writer_version: protocol.min_writer_version(),
-        },
+        map_protocol_to_pb(protocol),
     ))
 }
 
@@ -224,9 +240,10 @@ fn map_open_or_snapshot_error(e: DeltaTableError) -> Status {
 async fn stream_active_files(
     table_uri: Url,
     storage_opts: HashMap<String, String>,
+    at: ReadAt,
     tx: tokio::sync::mpsc::Sender<Result<ListActiveFilesResponse, Status>>,
 ) {
-    let result = stream_active_files_inner(table_uri, storage_opts, &tx).await;
+    let result = stream_active_files_inner(table_uri, storage_opts, at, &tx).await;
     if let Err(status) = result {
         let _ = tx.send(Err(status)).await;
     }
@@ -235,6 +252,7 @@ async fn stream_active_files(
 async fn stream_active_files_inner(
     table_uri: Url,
     storage_opts: HashMap<String, String>,
+    at: ReadAt,
     tx: &tokio::sync::mpsc::Sender<Result<ListActiveFilesResponse, Status>>,
 ) -> Result<(), Status> {
     if !table_exists(&table_uri, storage_opts.clone())
@@ -246,7 +264,7 @@ async fn stream_active_files_inner(
         )));
     }
 
-    let table = open_table(&table_uri, storage_opts)
+    let table = open_table_at(&table_uri, storage_opts, at)
         .await
         .map_err(Status::from)?;
 
@@ -313,6 +331,7 @@ async fn stream_active_files_inner(
             file_view.modification_time(),
             partition_values,
             file_view.stats(),
+            file_view.deletion_vector_descriptor(),
         ));
 
         if batch.len() >= FILE_BATCH_SIZE {
@@ -447,6 +466,32 @@ impl DeltaTxnService for DeltaTxnGrpcServer {
             }
         }
 
+        // Server-side idempotency for SetTransaction: inside the lock, so
+        // two concurrent retries of the same (app_id, version) can't both
+        // pass. Without this a client retrying a Commit whose outcome it
+        // never saw (a timeout) would commit the same files twice.
+        for action in &actions {
+            if let deltalake::kernel::Action::Txn(txn) = action {
+                let committed = table
+                    .snapshot()
+                    .map_err(map_open_or_snapshot_error)?
+                    .transaction_version(table.log_store().as_ref(), &txn.app_id)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!(error = %e, "failed to read app transaction version");
+                        Status::internal("internal error reading app transaction version")
+                    })?;
+                if let Some(committed) = committed {
+                    if committed >= txn.version {
+                        return Err(Status::from(DeltaTxnError::TransactionAlreadyCommitted {
+                            app_id: txn.app_id.clone(),
+                            committed,
+                        }));
+                    }
+                }
+            }
+        }
+
         let version = commit_actions(table, actions)
             .await
             .map_err(|e| Status::from(e))?;
@@ -470,6 +515,12 @@ impl DeltaTxnService for DeltaTxnGrpcServer {
         let table_uri = r.table_uri;
 
         let normalized_table_uri = self.normalize_and_check_table_uri(&table_uri)?;
+        let at = parse_read_at(r.version, r.timestamp_ms)?;
+        if r.app_id.as_deref() == Some("") {
+            return Err(Status::invalid_argument(
+                "app_id must not be empty when set",
+            ));
+        }
 
         if !table_exists(&normalized_table_uri, self.storage_opts.clone())
             .await
@@ -480,18 +531,30 @@ impl DeltaTxnService for DeltaTxnGrpcServer {
             )));
         }
 
-        let table = open_table(&normalized_table_uri, self.storage_opts.clone())
+        let table = open_table_at(&normalized_table_uri, self.storage_opts.clone(), at)
             .await
             .map_err(Status::from)?;
 
         let snapshot = table.snapshot().map_err(map_open_or_snapshot_error)?;
         let (metadata, protocol) = build_metadata_and_protocol(snapshot)?;
 
+        let app_transaction_version = match r.app_id {
+            Some(app_id) => snapshot
+                .transaction_version(table.log_store().as_ref(), app_id)
+                .await
+                .map_err(|e| {
+                    tracing::error!(error = %e, "failed to read app transaction version");
+                    Status::internal("internal error reading app transaction version")
+                })?,
+            None => None,
+        };
+
         Ok(Response::new(GetTableResponse {
             // See stream_active_files_inner's matching cast comment above.
             version: snapshot.version() as i64,
             metadata: Some(metadata),
             protocol: Some(protocol),
+            app_transaction_version,
         }))
     }
 
@@ -517,11 +580,17 @@ impl DeltaTxnService for DeltaTxnGrpcServer {
         let table_uri = r.table_uri;
 
         let normalized_table_uri = self.normalize_and_check_table_uri(&table_uri)?;
+        let at = parse_read_at(r.version, r.timestamp_ms)?;
 
         let storage_opts = self.storage_opts.clone();
         let (tx, rx) = tokio::sync::mpsc::channel(STREAM_CHANNEL_CAPACITY);
 
-        tokio::spawn(stream_active_files(normalized_table_uri, storage_opts, tx));
+        tokio::spawn(stream_active_files(
+            normalized_table_uri,
+            storage_opts,
+            at,
+            tx,
+        ));
 
         let stream: Self::ListActiveFilesStream = Box::pin(ReceiverStream::new(rx));
         Ok(Response::new(stream))

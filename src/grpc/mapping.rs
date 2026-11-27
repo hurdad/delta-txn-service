@@ -20,7 +20,10 @@
 //! field -- reuses delta-rs's own parsing/validation instead of
 //! duplicating it, at the cost of the mapping being one step more
 //! indirect than a plain struct literal would be.
-use deltalake::kernel::{Action, Add, CommitInfo, Metadata, Protocol, Remove};
+use deltalake::kernel::{
+    Action, Add, AddCDCFile, CommitInfo, DeletionVectorDescriptor, DomainMetadata, Metadata,
+    Protocol, Remove, StorageType, Transaction,
+};
 
 use serde_json::Value;
 
@@ -53,12 +56,17 @@ pub fn map_actions(pb_actions: Vec<pb::Action>) -> Result<Vec<Action>, String> {
 // apply to "this file is part of the table's current snapshot," which is
 // all a read needs to say -- so data_change is always reported True (this
 // file has real data, whatever wrote it) and tags always empty.
+//
+// `deletion_vector` is passed through as-is: a file with one still
+// physically contains the deleted rows, so a reader that never saw it
+// would return them.
 pub fn map_active_file_to_pb(
     path: String,
     size: i64,
     modification_time: i64,
     partition_values: std::collections::HashMap<String, Option<String>>,
     stats_json: Option<String>,
+    deletion_vector: Option<DeletionVectorDescriptor>,
 ) -> pb::AddFile {
     pb::AddFile {
         path,
@@ -71,6 +79,43 @@ pub fn map_active_file_to_pb(
         data_change: pb::DataChange::True as i32,
         stats: map_stats_json_to_pb(stats_json),
         tags: std::collections::HashMap::new(),
+        deletion_vector: deletion_vector.map(map_deletion_vector_to_pb),
+    }
+}
+
+fn map_deletion_vector_to_pb(dv: DeletionVectorDescriptor) -> pb::DeletionVector {
+    pb::DeletionVector {
+        storage_type: dv.storage_type.to_string(),
+        path_or_inline_dv: dv.path_or_inline_dv,
+        offset: dv.offset,
+        size_in_bytes: dv.size_in_bytes,
+        cardinality: dv.cardinality,
+    }
+}
+
+/// Kernel Protocol -> wire Protocol, including table features. The
+/// kernel's own feature accessors are crate-private, so this reads them
+/// back through Protocol's Serialize impl (Delta log JSON: camelCase
+/// `readerFeatures`/`writerFeatures` arrays of feature names), the same
+/// log-JSON route map_protocol() uses in the other direction.
+pub fn map_protocol_to_pb(protocol: &Protocol) -> pb::Protocol {
+    let value = serde_json::to_value(protocol).unwrap_or(Value::Null);
+    let features = |key: &str| -> Vec<String> {
+        value
+            .get(key)
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|f| f.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    pb::Protocol {
+        min_reader_version: protocol.min_reader_version(),
+        min_writer_version: protocol.min_writer_version(),
+        reader_features: features("readerFeatures"),
+        writer_features: features("writerFeatures"),
     }
 }
 
@@ -156,48 +201,162 @@ fn value_to_max(v: &Value) -> Option<pb::column_stats::MaxValue> {
 }
 
 /// Dispatches on the request Action's oneof to the matching kernel::Action
-/// variant. `Add`/`Remove` fields not listed here at all (deletion_vector,
-/// base_row_id, default_row_commit_version, clustering_provider,
-/// extended_file_metadata) aren't oversights -- the AddFile/RemoveFile
-/// proto messages simply don't have wire fields for them yet (newer Delta
-/// features this service's schema hasn't been extended to carry); every
-/// commit through this service always sets them to their "not present"
-/// value (None), regardless of what a more modern writer might set.
+/// variant. The row-tracking/clustering fields on Add/Remove
+/// (base_row_id, default_row_commit_version, clustering_provider) have no
+/// wire fields and are always left unset: delta-rs assigns them itself
+/// when the table enables those features.
 fn map_action(action: pb::Action) -> Result<Action, String> {
     match action.action.ok_or("missing action")? {
-        PbAction::Add(a) => Ok(Action::Add(Add {
-            path: a.path,
-            size: a.size,
-            modification_time: a.modification_time,
-            partition_values: map_string_map(a.partition_values),
-            data_change: map_data_change(a.data_change)?,
-            stats: map_file_stats(a.stats),
-            tags: map_optional_string_map(a.tags),
-            deletion_vector: None,
-            base_row_id: None,
-            default_row_commit_version: None,
-            clustering_provider: None,
-        })),
+        PbAction::Add(a) => {
+            validate_file_path("add", &a.path)?;
+            Ok(Action::Add(Add {
+                path: a.path,
+                size: a.size,
+                modification_time: a.modification_time,
+                partition_values: map_string_map(a.partition_values),
+                data_change: map_data_change(a.data_change)?,
+                stats: map_file_stats(a.stats),
+                tags: map_optional_string_map(a.tags),
+                deletion_vector: map_deletion_vector(a.deletion_vector)?,
+                base_row_id: None,
+                default_row_commit_version: None,
+                clustering_provider: None,
+            }))
+        }
 
-        PbAction::Remove(r) => Ok(Action::Remove(Remove {
-            path: r.path,
-            deletion_timestamp: r.deletion_timestamp,
-            data_change: map_data_change(r.data_change)?,
-            extended_file_metadata: None,
-            partition_values: None,
-            size: None,
-            tags: None,
-            deletion_vector: None,
-            base_row_id: None,
-            default_row_commit_version: None,
-        })),
+        PbAction::Remove(r) => {
+            validate_file_path("remove", &r.path)?;
+            // Delta's extendedFileMetadata flag means "size and
+            // partitionValues are recorded on this remove".
+            let extended = r.size.is_some() || !r.partition_values.is_empty();
+            Ok(Action::Remove(Remove {
+                path: r.path,
+                deletion_timestamp: r.deletion_timestamp,
+                data_change: map_data_change(r.data_change)?,
+                extended_file_metadata: extended.then_some(true),
+                partition_values: (!r.partition_values.is_empty())
+                    .then(|| map_string_map(r.partition_values)),
+                size: r.size,
+                tags: None,
+                deletion_vector: map_deletion_vector(r.deletion_vector)?,
+                base_row_id: None,
+                default_row_commit_version: None,
+            }))
+        }
 
         PbAction::Protocol(p) => Ok(Action::Protocol(map_protocol(p)?)),
 
         PbAction::MetaData(m) => Ok(Action::Metadata(map_metadata(m)?)),
 
         PbAction::CommitInfo(ci) => Ok(Action::CommitInfo(map_commit_info(ci)?)),
+
+        PbAction::Txn(t) => {
+            if t.app_id.is_empty() {
+                return Err("txn.app_id must not be empty".to_string());
+            }
+            Ok(Action::Txn(Transaction::new_with_last_update(
+                t.app_id,
+                t.version,
+                t.last_updated,
+            )))
+        }
+
+        PbAction::Cdc(c) => {
+            validate_file_path("cdc", &c.path)?;
+            Ok(Action::Cdc(AddCDCFile {
+                path: c.path,
+                size: c.size,
+                partition_values: map_string_map(c.partition_values),
+                data_change: map_data_change(c.data_change)?,
+                tags: map_optional_string_map(c.tags),
+            }))
+        }
+
+        PbAction::DomainMetadata(d) => {
+            if d.domain.is_empty() {
+                return Err("domain_metadata.domain must not be empty".to_string());
+            }
+            Ok(Action::DomainMetadata(DomainMetadata {
+                domain: d.domain,
+                configuration: d.configuration,
+                removed: d.removed,
+            }))
+        }
     }
+}
+
+/// Rejects a file path that could point outside the table root. Delta
+/// paths are relative to the table root and percent-encoded; the spec
+/// also allows absolute URIs (shallow clones), but accepting those would
+/// let any writer register a file in another bucket or table, which every
+/// reader then trusts -- sidestepping DELTA_TXN_ALLOWED_TABLE_PREFIXES.
+/// So this rejects: empty paths, absolute paths and URIs (`/x`, `\x`,
+/// `C:x`, `s3://...`), and any `..` segment, checked after decoding the
+/// percent-encoded forms of `.`, `/` and `\`.
+fn validate_file_path(kind: &str, path: &str) -> Result<(), String> {
+    if path.is_empty() {
+        return Err(format!("{kind}.path must not be empty"));
+    }
+    let decoded = path
+        .replace("%2e", ".")
+        .replace("%2E", ".")
+        .replace("%2f", "/")
+        .replace("%2F", "/")
+        .replace("%5c", "\\")
+        .replace("%5C", "\\");
+    let bytes = decoded.as_bytes();
+    let has_drive_letter = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    if decoded.contains("://")
+        || decoded.starts_with('/')
+        || decoded.starts_with('\\')
+        || has_drive_letter
+    {
+        return Err(format!(
+            "{kind}.path '{path}' must be relative to the table root, not an absolute path or URI"
+        ));
+    }
+    if decoded.split(['/', '\\']).any(|segment| segment == "..") {
+        return Err(format!(
+            "{kind}.path '{path}' must not contain '..' segments"
+        ));
+    }
+    Ok(())
+}
+
+/// Wire DeletionVector -> kernel descriptor. Absolute-path ("p") vectors
+/// are rejected for the same reason absolute file paths are (see
+/// validate_file_path).
+fn map_deletion_vector(
+    dv: Option<pb::DeletionVector>,
+) -> Result<Option<DeletionVectorDescriptor>, String> {
+    let Some(dv) = dv else {
+        return Ok(None);
+    };
+    let storage_type: StorageType = dv
+        .storage_type
+        .parse()
+        .map_err(|_| format!("invalid deletion_vector.storage_type '{}'", dv.storage_type))?;
+    match storage_type {
+        StorageType::AbsolutePath => {
+            return Err(
+                "deletion_vector.storage_type 'p' (absolute path) is not accepted".to_string(),
+            )
+        }
+        StorageType::Inline if dv.offset.is_some() => {
+            return Err("deletion_vector.offset must be unset for inline ('i') vectors".to_string())
+        }
+        _ => {}
+    }
+    if dv.path_or_inline_dv.is_empty() {
+        return Err("deletion_vector.path_or_inline_dv must not be empty".to_string());
+    }
+    Ok(Some(DeletionVectorDescriptor {
+        storage_type,
+        path_or_inline_dv: dv.path_or_inline_dv,
+        offset: dv.offset,
+        size_in_bytes: dv.size_in_bytes,
+        cardinality: dv.cardinality,
+    }))
 }
 
 /// `DataChange::Unspecified` (proto3's implicit zero-value default for an
@@ -303,12 +462,24 @@ fn map_optional_string_map(
     }
 }
 
+/// Wire Protocol -> kernel Protocol. Feature lists are included exactly
+/// when Delta expects them (`readerFeatures` with reader version 3,
+/// `writerFeatures` with writer version 7) or when the client sent some
+/// anyway; the kernel's own validation (Protocol::try_new, which its
+/// Deserialize impl runs) then rejects any inconsistent combination, e.g.
+/// features listed under a legacy version.
 fn map_protocol(protocol: pb::Protocol) -> Result<Protocol, String> {
-    let value = serde_json::json!({
+    let mut value = serde_json::json!({
         "minReaderVersion": protocol.min_reader_version,
         "minWriterVersion": protocol.min_writer_version,
     });
-    serde_json::from_value(value).map_err(|e| e.to_string())
+    if protocol.min_reader_version == 3 || !protocol.reader_features.is_empty() {
+        value["readerFeatures"] = serde_json::json!(protocol.reader_features);
+    }
+    if protocol.min_writer_version == 7 || !protocol.writer_features.is_empty() {
+        value["writerFeatures"] = serde_json::json!(protocol.writer_features);
+    }
+    serde_json::from_value(value).map_err(|e| format!("invalid protocol: {e}"))
 }
 
 /// Builds a Delta table's Metadata action from a client-supplied
@@ -352,17 +523,10 @@ fn map_metadata(metadata: pb::TableMetadata) -> Result<Metadata, String> {
 /// what shows up in Delta's own commit-history API/tooling) from the
 /// client's request.
 ///
-/// NOTE (relevant to the operation-type gap documented in delta::commit's
-/// own doc comment): `map_commit_operation` below *does* faithfully
-/// translate the client's CommitOperation enum into this action's
-/// `operation` string field (e.g. "DELETE", "MERGE") -- so a client
-/// request that says DELETE really does get "DELETE" recorded in this
-/// CommitInfo action, and would show up correctly in commit-history
-/// tooling. What's still wrong is a *separate* value: CommitBuilder's own
-/// `operation: DeltaOperation` parameter (set in delta::commit::
-/// commit_actions, unrelated to this CommitInfo action despite the
-/// similar name) is hardcoded to Write regardless of what's recorded
-/// here, and that's the one delta-rs's conflict-checker actually consults.
+/// `map_commit_operation` below records the client's CommitOperation as
+/// this action's `operation` string (e.g. "DELETE", "MERGE"). That same
+/// string is what delta::commit::build_operation reads to choose the
+/// DeltaOperation CommitBuilder uses for conflict detection.
 fn map_commit_info(commit_info: pb::CommitInfo) -> Result<CommitInfo, String> {
     let operation = map_commit_operation(commit_info.operation);
     let operation_parameters = map_json_map(commit_info.operation_parameters);
@@ -462,6 +626,243 @@ fn map_commit_operation(operation: i32) -> Option<String> {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn validate_file_path_accepts_relative_paths() {
+        for ok in [
+            "part-0.parquet",
+            "year=2026/part-0.parquet",
+            "a/b/c%20d.parquet",
+            "deletion_vector_1.bin",
+            "..hidden-but-not-a-segment.parquet",
+        ] {
+            assert!(
+                validate_file_path("add", ok).is_ok(),
+                "{ok} should be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_file_path_rejects_paths_outside_the_table_root() {
+        for bad in [
+            "",
+            "/etc/passwd",
+            "\\\\server\\share\\x.parquet",
+            "C:x.parquet",
+            "s3://other-bucket/secret.parquet",
+            "file:///tmp/x.parquet",
+            "../other_table/part-0.parquet",
+            "a/../../x.parquet",
+            "a\\..\\x.parquet",
+            "%2e%2e/x.parquet",
+            "a%2F..%2Fx.parquet",
+            "%2Fetc%2Fpasswd",
+        ] {
+            assert!(
+                validate_file_path("add", bad).is_err(),
+                "{bad:?} should be rejected"
+            );
+        }
+    }
+
+    fn add_action(path: &str) -> pb::Action {
+        pb::Action {
+            action: Some(PbAction::Add(pb::AddFile {
+                path: path.to_string(),
+                data_change: pb::DataChange::True as i32,
+                ..Default::default()
+            })),
+        }
+    }
+
+    #[test]
+    fn map_action_rejects_escaping_paths_for_add_remove_and_cdc() {
+        assert!(map_action(add_action("../x.parquet")).is_err());
+        assert!(map_action(pb::Action {
+            action: Some(PbAction::Remove(pb::RemoveFile {
+                path: "s3://elsewhere/x.parquet".to_string(),
+                data_change: pb::DataChange::True as i32,
+                ..Default::default()
+            })),
+        })
+        .is_err());
+        assert!(map_action(pb::Action {
+            action: Some(PbAction::Cdc(pb::AddCdcFile {
+                path: "/abs/cdc.parquet".to_string(),
+                data_change: pb::DataChange::False as i32,
+                ..Default::default()
+            })),
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn map_action_maps_deletion_vectors_and_rejects_absolute_ones() {
+        let dv = |storage_type: &str, offset: Option<i32>| pb::DeletionVector {
+            storage_type: storage_type.to_string(),
+            path_or_inline_dv: "vBn[lx{q8@P<9BNH/isA".to_string(),
+            offset,
+            size_in_bytes: 36,
+            cardinality: 2,
+        };
+        let with_dv = |d| pb::Action {
+            action: Some(PbAction::Add(pb::AddFile {
+                path: "part-0.parquet".to_string(),
+                data_change: pb::DataChange::True as i32,
+                deletion_vector: Some(d),
+                ..Default::default()
+            })),
+        };
+
+        let Action::Add(add) = map_action(with_dv(dv("u", Some(1)))).unwrap() else {
+            panic!("expected Add");
+        };
+        let mapped = add.deletion_vector.expect("deletion vector should be kept");
+        assert_eq!(mapped.storage_type, StorageType::UuidRelativePath);
+        assert_eq!(mapped.offset, Some(1));
+        assert_eq!(mapped.cardinality, 2);
+
+        assert!(
+            map_action(with_dv(dv("p", Some(1)))).is_err(),
+            "absolute DV"
+        );
+        assert!(
+            map_action(with_dv(dv("i", Some(1)))).is_err(),
+            "inline DV with offset"
+        );
+        assert!(
+            map_action(with_dv(dv("x", None))).is_err(),
+            "unknown storage type"
+        );
+    }
+
+    #[test]
+    fn map_deletion_vector_to_pb_round_trips() {
+        let dv = DeletionVectorDescriptor {
+            storage_type: StorageType::Inline,
+            path_or_inline_dv: "wi5b=000010000siXQKl0rr91000f55c8Xg0@@D72lkbi5=-{L".to_string(),
+            offset: None,
+            size_in_bytes: 40,
+            cardinality: 6,
+        };
+        let pb_dv = map_deletion_vector_to_pb(dv.clone());
+        assert_eq!(pb_dv.storage_type, "i");
+        assert_eq!(map_deletion_vector(Some(pb_dv)).unwrap(), Some(dv));
+    }
+
+    #[test]
+    fn map_protocol_round_trips_table_features() {
+        let wire = pb::Protocol {
+            min_reader_version: 3,
+            min_writer_version: 7,
+            reader_features: vec!["deletionVectors".to_string()],
+            writer_features: vec!["deletionVectors".to_string(), "appendOnly".to_string()],
+        };
+        let kernel = map_protocol(wire).expect("valid v3/v7 protocol");
+        let back = map_protocol_to_pb(&kernel);
+        assert_eq!(back.min_reader_version, 3);
+        assert_eq!(back.min_writer_version, 7);
+        assert_eq!(back.reader_features, vec!["deletionVectors".to_string()]);
+        let mut writer = back.writer_features.clone();
+        writer.sort();
+        assert_eq!(
+            writer,
+            vec!["appendOnly".to_string(), "deletionVectors".to_string()]
+        );
+    }
+
+    #[test]
+    fn map_protocol_legacy_versions_have_no_features() {
+        let kernel = map_protocol(pb::Protocol {
+            min_reader_version: 1,
+            min_writer_version: 2,
+            ..Default::default()
+        })
+        .unwrap();
+        let back = map_protocol_to_pb(&kernel);
+        assert!(back.reader_features.is_empty());
+        assert!(back.writer_features.is_empty());
+    }
+
+    #[test]
+    fn map_protocol_rejects_features_on_legacy_versions() {
+        assert!(map_protocol(pb::Protocol {
+            min_reader_version: 1,
+            min_writer_version: 2,
+            reader_features: vec!["deletionVectors".to_string()],
+            writer_features: Vec::new(),
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn map_action_maps_txn_cdc_and_domain_metadata() {
+        let txn = map_action(pb::Action {
+            action: Some(PbAction::Txn(pb::SetTransaction {
+                app_id: "ingest-1".to_string(),
+                version: 42,
+                last_updated: Some(1_700_000_000_000),
+            })),
+        })
+        .unwrap();
+        assert_eq!(
+            txn,
+            Action::Txn(Transaction::new_with_last_update(
+                "ingest-1",
+                42,
+                Some(1_700_000_000_000)
+            ))
+        );
+
+        assert!(
+            map_action(pb::Action {
+                action: Some(PbAction::Txn(pb::SetTransaction::default())),
+            })
+            .is_err(),
+            "empty app_id"
+        );
+
+        let cdc = map_action(pb::Action {
+            action: Some(PbAction::Cdc(pb::AddCdcFile {
+                path: "_change_data/cdc-0.parquet".to_string(),
+                size: 10,
+                data_change: pb::DataChange::False as i32,
+                ..Default::default()
+            })),
+        })
+        .unwrap();
+        assert!(
+            matches!(cdc, Action::Cdc(ref c) if c.path == "_change_data/cdc-0.parquet" && !c.data_change)
+        );
+
+        let domain = map_action(pb::Action {
+            action: Some(PbAction::DomainMetadata(pb::DomainMetadata {
+                domain: "delta.clustering".to_string(),
+                configuration: "{\"clusteringColumns\":[]}".to_string(),
+                removed: false,
+            })),
+        })
+        .unwrap();
+        assert!(matches!(domain, Action::DomainMetadata(ref d) if d.domain == "delta.clustering"));
+    }
+
+    #[test]
+    fn map_action_records_extended_file_metadata_on_remove() {
+        let Action::Remove(remove) = map_action(pb::Action {
+            action: Some(PbAction::Remove(pb::RemoveFile {
+                path: "part-0.parquet".to_string(),
+                data_change: pb::DataChange::True as i32,
+                size: Some(100),
+                ..Default::default()
+            })),
+        })
+        .unwrap() else {
+            panic!("expected Remove");
+        };
+        assert_eq!(remove.extended_file_metadata, Some(true));
+        assert_eq!(remove.size, Some(100));
+    }
 
     #[test]
     fn map_data_change_maps_valid_values() {
@@ -694,6 +1095,7 @@ mod tests {
                 serde_json::json!({"numRecords": 5, "minValues": {}, "maxValues": {}, "nullCount": {}})
                     .to_string(),
             ),
+            None,
         );
 
         assert_eq!(pb_add.path, "part-0.parquet");
@@ -713,8 +1115,14 @@ mod tests {
         let mut partition_values = HashMap::new();
         partition_values.insert("region".to_string(), None);
 
-        let pb_add =
-            map_active_file_to_pb("part-0.parquet".to_string(), 1, 0, partition_values, None);
+        let pb_add = map_active_file_to_pb(
+            "part-0.parquet".to_string(),
+            1,
+            0,
+            partition_values,
+            None,
+            None,
+        );
 
         assert_eq!(pb_add.partition_values.get("region"), Some(&String::new()));
         assert!(pb_add.stats.is_none());

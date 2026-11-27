@@ -33,6 +33,21 @@ pub enum DeltaTxnError {
     /// CommitBuilder at all.
     #[error("Version conflict: expected {expected}, found {actual}")]
     VersionConflict { expected: i64, actual: i64 },
+
+    /// A time-travel read (GetTable/ListActiveFiles `version` or
+    /// `timestamp_ms`) asked for a version that doesn't exist: newer than
+    /// the latest, older than the oldest the log still holds, or a
+    /// timestamp before the table's first commit. The message is
+    /// client-safe (it only echoes what the client asked for).
+    #[error("{0}")]
+    VersionNotFound(String),
+
+    /// A SetTransaction in a Commit whose (app_id, version) the table has
+    /// already recorded: the same or a later version for that app id is
+    /// already committed, so this commit is a retry of one that already
+    /// landed (or is out of order) and must not be applied again.
+    #[error("app_id '{app_id}' already committed transaction version {committed}")]
+    TransactionAlreadyCommitted { app_id: String, committed: i64 },
 }
 
 impl From<DeltaTxnError> for tonic::Status {
@@ -57,6 +72,13 @@ impl From<DeltaTxnError> for tonic::Status {
             // generic message. This is the one place either of these
             // errors' real detail is observable at all, so losing it here
             // means losing it entirely -- log before converting, not after.
+            DeltaTxnError::VersionNotFound(msg) => tonic::Status::not_found(msg.clone()),
+            // ALREADY_EXISTS: the work this commit describes is already in
+            // the table. A client retrying after an unknown outcome should
+            // treat this as success, not retry again.
+            DeltaTxnError::TransactionAlreadyCommitted { .. } => {
+                tonic::Status::already_exists(err.to_string())
+            }
             DeltaTxnError::OpenFailed(_) | DeltaTxnError::CommitFailed(_) => {
                 tracing::error!(error = %err, "internal delta error");
                 tonic::Status::internal("internal error processing delta table")

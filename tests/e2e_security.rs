@@ -20,7 +20,10 @@ async fn requests_without_an_api_key_are_rejected_when_one_is_configured() {
     let mut client = server.connect().await;
 
     let err = client
-        .get_table(pb::GetTableRequest { table_uri })
+        .get_table(pb::GetTableRequest {
+            table_uri,
+            ..Default::default()
+        })
         .await
         .expect_err("a request with no credentials must be rejected when an API key is set");
     assert_eq!(err.code(), Code::Unauthenticated);
@@ -37,7 +40,10 @@ async fn requests_with_the_wrong_api_key_are_rejected() {
     let mut client = server.connect().await;
 
     let req = common::with_api_key(
-        tonic::Request::new(pb::GetTableRequest { table_uri }),
+        tonic::Request::new(pb::GetTableRequest {
+            table_uri,
+            ..Default::default()
+        }),
         "wrong-key",
     );
     let err = client
@@ -61,7 +67,10 @@ async fn requests_with_the_correct_api_key_are_accepted() {
     // check -- what matters here is that it's NotFound, not Unauthenticated,
     // proving the correct key got the request past the interceptor.
     let req = common::with_api_key(
-        tonic::Request::new(pb::GetTableRequest { table_uri }),
+        tonic::Request::new(pb::GetTableRequest {
+            table_uri,
+            ..Default::default()
+        }),
         "super-secret",
     );
     let err = client
@@ -95,7 +104,10 @@ async fn table_uri_outside_the_allowlist_is_rejected() {
     let mut client = server.connect().await;
 
     let err = client
-        .get_table(pb::GetTableRequest { table_uri })
+        .get_table(pb::GetTableRequest {
+            table_uri,
+            ..Default::default()
+        })
         .await
         .expect_err("a table_uri outside the configured allowlist must be rejected");
     assert_eq!(err.code(), Code::PermissionDenied);
@@ -126,6 +138,7 @@ async fn table_uri_outside_the_allowlist_never_creates_a_local_directory() {
     let err = client
         .get_table(pb::GetTableRequest {
             table_uri: disallowed_uri,
+            ..Default::default()
         })
         .await
         .expect_err("a table_uri outside the configured allowlist must be rejected");
@@ -154,6 +167,7 @@ async fn table_uri_inside_the_allowlist_passes_the_check() {
     let err = client
         .get_table(pb::GetTableRequest {
             table_uri: format!("{allowed_root}/orders"),
+            ..Default::default()
         })
         .await
         .expect_err("the table itself still doesn't exist");

@@ -12,9 +12,10 @@ package delta.txn.v1;
 // README.md for the full picture (why this exists, what it deliberately
 // does *not* do, deployment/config).
 service DeltaTxnService {
-  // Unary: returns a table's current version, schema, and protocol. No
-  // file listing -- see ListActiveFiles for that. Takes no lock and
-  // reflects whatever snapshot happens to be visible at the moment the
+  // Unary: returns a table's version, schema, and protocol -- the latest
+  // version by default, or an earlier one via GetTableRequest's time-travel
+  // fields. No file listing -- see ListActiveFiles for that. Takes no lock
+  // and reflects whatever snapshot happens to be visible at the moment the
   // server opens the table; Delta readers never block on writers.
   rpc GetTable(GetTableRequest) returns (GetTableResponse);
 
@@ -23,8 +24,9 @@ service DeltaTxnService {
   // CommitRequest's own field comments for the exact semantics.
   rpc Commit(CommitRequest) returns (CommitResponse);
 
-  // Streams every currently-active (i.e. not yet removed) data file for a
-  // table's latest version -- the read-side counterpart to Commit's
+  // Streams every active (i.e. not yet removed) data file for a table's
+  // latest version, or an earlier one via ListActiveFilesRequest's
+  // time-travel fields -- the read-side counterpart to Commit's
   // AddFile/RemoveFile actions. A server-streaming response, not a single
   // unary message, since a real Delta table's active file set (unlike
   // GetTable's own small metadata payload) can be large enough to blow
@@ -45,12 +47,29 @@ message GetTableRequest {
   // the server's optional DELTA_TXN_ALLOWED_TABLE_PREFIXES allowlist, if
   // one is configured, before anything is opened.
   string table_uri = 1;
+
+  // Time travel: read the table as of an earlier state. At most one of
+  // `version` / `timestamp_ms` may be set (INVALID_ARGUMENT otherwise);
+  // neither means the latest version. A version that doesn't exist (or was
+  // already cleaned up from the log) is NOT_FOUND.
+  optional int64 version = 2;
+  // Milliseconds since the Unix epoch: the latest version committed at or
+  // before this instant.
+  optional int64 timestamp_ms = 3;
+
+  // Idempotent writers: when set, the response's app_transaction_version
+  // reports the last SetTransaction version this application id committed
+  // to the table (see SetTransaction).
+  optional string app_id = 4;
 }
 
 message GetTableResponse {
   int64 version = 1;
   TableMetadata metadata = 2;
   Protocol protocol = 3;
+  // Only when GetTableRequest.app_id was set: the last SetTransaction
+  // version committed for that app id, or unset if it never committed one.
+  optional int64 app_transaction_version = 4;
 }
 
 // ======================================================
@@ -60,6 +79,9 @@ message GetTableResponse {
 message ListActiveFilesRequest {
   // Same meaning/validation as GetTableRequest.table_uri above.
   string table_uri = 1;
+  // Same meaning/validation as GetTableRequest.version / timestamp_ms.
+  optional int64 version = 2;
+  optional int64 timestamp_ms = 3;
 }
 
 // The stream always begins with exactly one `header` message, followed by
@@ -121,8 +143,8 @@ message CommitRequest {
 
   // Applied as a single ordered transaction -- order matters (e.g. a
   // Remove before an Add for the same logical file path is a different
-  // outcome than the reverse). At least one action is expected in
-  // practice, though this message doesn't itself enforce non-emptiness.
+  // outcome than the reverse). Must be non-empty, and at most the server's
+  // DELTA_TXN_MAX_ACTIONS_PER_COMMIT (INVALID_ARGUMENT otherwise).
   repeated Action actions = 3;
 
   // Deliberately unused today -- present for future use (e.g. request-level
@@ -155,6 +177,9 @@ message Action {
     Protocol protocol = 3;
     TableMetadata meta_data = 4;
     CommitInfo commit_info = 5;
+    SetTransaction txn = 6;
+    AddCDCFile cdc = 7;
+    DomainMetadata domain_metadata = 8;
   }
 }
 
@@ -164,10 +189,11 @@ message Action {
 
 // Mirrors Delta's own commit-history "operation" concept (what shows up
 // in `DESCRIBE HISTORY`-style tooling) -- recorded into a commit's
-// CommitInfo action via CommitInfo.operation below. Does *not* currently
-// affect the server's own internal conflict-detection isolation-level
-// choice, which is a separate, hardcoded value -- see delta-txn-service's
-// own commit.rs doc comment for the details of that gap.
+// CommitInfo action via CommitInfo.operation below. Also chooses the
+// operation delta-rs uses for conflict detection: OPTIMIZE and VACUUM
+// don't change data, so they get a weaker isolation check. CONVERT has
+// no delta-rs equivalent and is treated as WRITE for that purpose (see
+// the server's delta/commit.rs build_operation).
 enum CommitOperation {
   COMMIT_OPERATION_UNSPECIFIED = 0;
 
@@ -206,10 +232,11 @@ enum DataChange {
 // `data_change` is always reported true and `tags` always empty, since
 // neither concept is exposed by the read API delta-rs itself provides.
 message AddFile {
-  // Storage path for this file -- typically relative to the table's own
-  // root (table_uri), per Delta convention, though the protocol also
-  // permits an absolute URI; this service does not itself normalize or
-  // validate which form a given path uses.
+  // Storage path for this file, relative to the table's root (table_uri)
+  // and percent-encoded per the Delta spec. On Commit the server rejects
+  // (INVALID_ARGUMENT) an empty path, an absolute path or URI, and any
+  // `..` segment: a path that escapes the table root would let a writer
+  // point readers at files outside the allowlisted table.
   string path = 1;
 
   int64 size = 2;
@@ -236,6 +263,12 @@ message AddFile {
   // file. Never populated on a ListActiveFiles response (see this
   // message's own top comment); only meaningful on the Commit write path.
   map<string, string> tags = 7;
+
+  // Rows of this file that are logically deleted. Readers MUST apply it:
+  // a file with a deletion vector still physically contains the deleted
+  // rows. Only valid on tables whose protocol includes the
+  // "deletionVectors" feature.
+  DeletionVector deletion_vector = 8;
 }
 
 message RemoveFile {
@@ -248,6 +281,59 @@ message RemoveFile {
   // permits this for certain operations), not "zero"/epoch.
   optional int64 deletion_timestamp = 2;
   DataChange data_change = 3;
+  // Must equal the deletion vector of the active file being removed, if it
+  // has one: Delta identifies an active file by (path, deletion vector).
+  DeletionVector deletion_vector = 4;
+  // Optional extended file metadata (Delta's `extendedFileMetadata`):
+  // recording size and partition values lets readers of the remove (e.g.
+  // VACUUM, CDF) work without the original add.
+  optional int64 size = 5;
+  map<string, string> partition_values = 6;
+}
+
+// Delta deletion vector descriptor (PROTOCOL.md "Deletion Vectors").
+message DeletionVector {
+  // "u" (UUID-relative path), "i" (inline), or "p" (absolute path).
+  string storage_type = 1;
+  string path_or_inline_dv = 2;
+  // Byte offset into the DV file; unset for inline ("i") vectors.
+  optional int32 offset = 3;
+  int32 size_in_bytes = 4;
+  // Number of rows this vector deletes.
+  int64 cardinality = 5;
+}
+
+// Delta `txn` action: records that application `app_id` has committed
+// its own monotonically increasing `version`. Writers use it for
+// exactly-once commits: before retrying a Commit whose outcome is unknown
+// (e.g. a timeout), read GetTable with app_id set and skip the retry if
+// app_transaction_version already covers it.
+message SetTransaction {
+  string app_id = 1;
+  int64 version = 2;
+  // Milliseconds since the Unix epoch; optional per the Delta spec.
+  optional int64 last_updated = 3;
+}
+
+// Delta `cdc` action: a change-data file written for Change Data Feed.
+// Only meaningful on tables with delta.enableChangeDataFeed = true. Path
+// rules are the same as AddFile.path.
+message AddCDCFile {
+  string path = 1;
+  int64 size = 2;
+  map<string, string> partition_values = 3;
+  DataChange data_change = 4;
+  map<string, string> tags = 5;
+}
+
+// Delta `domainMetadata` action: named configuration owned by a feature
+// or system (e.g. "delta.clustering" for liquid clustering). Requires the
+// "domainMetadata" writer feature.
+message DomainMetadata {
+  string domain = 1;
+  // Opaque to Delta; conventionally a JSON string.
+  string configuration = 2;
+  bool removed = 3;
 }
 
 // ======================================================
@@ -262,6 +348,14 @@ message RemoveFile {
 message Protocol {
   int32 min_reader_version = 1;
   int32 min_writer_version = 2;
+  // Table features (Delta "table features" protocol), in Delta's own
+  // camelCase names, e.g. "deletionVectors", "columnMapping",
+  // "timestampNtz". reader_features is used only when min_reader_version
+  // is 3, writer_features only when min_writer_version is 7 -- a client
+  // must refuse to read or write a table that lists a feature it doesn't
+  // implement.
+  repeated string reader_features = 3;
+  repeated string writer_features = 4;
 }
 
 message TableMetadata {

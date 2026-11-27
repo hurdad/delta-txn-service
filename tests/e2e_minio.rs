@@ -93,6 +93,7 @@ async fn commit_creates_a_new_table_on_minio_and_get_table_reads_it_back() {
     let get_table_response = client
         .get_table(pb::GetTableRequest {
             table_uri: table_uri.clone(),
+            ..Default::default()
         })
         .await
         .expect("GetTable against MinIO should succeed")
@@ -183,6 +184,7 @@ async fn list_active_files_round_trips_against_minio() {
     let mut stream = client
         .list_active_files(pb::ListActiveFilesRequest {
             table_uri: table_uri.clone(),
+            ..Default::default()
         })
         .await
         .expect("ListActiveFiles against MinIO should succeed")

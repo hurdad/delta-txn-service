@@ -1283,6 +1283,7 @@ dependencies = [
 name = "delta-txn-service"
 version = "0.1.1"
 dependencies = [
+ "chrono",
  "dashmap",
  "deltalake",
  "http-body",

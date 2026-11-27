@@ -37,7 +37,10 @@ This project provides:
 
 ✅ Opens Delta tables, and creates new ones on the first `Commit` to a table_uri that doesn't exist yet  
 ✅ Enforces optimistic concurrency (`expected_version`)  
-✅ Applies ordered Delta actions (`AddFile`, `RemoveFile`, `Protocol`, `Metadata`)  
+✅ Applies ordered Delta actions (`AddFile`, `RemoveFile`, `Protocol`, `Metadata`, `CommitInfo`,
+   `SetTransaction`, `AddCDCFile`, `DomainMetadata`), including deletion vectors and table features  
+✅ Makes retries safe: a `Commit` carrying a `SetTransaction` that's already recorded is refused (`ALREADY_EXISTS`)  
+✅ Time travel: `GetTable` / `ListActiveFiles` at a past version or timestamp  
 ✅ Commits atomically using `delta-rs`  
 ✅ Streams a table's currently-active file list (`ListActiveFiles`) for readers  
 ✅ Exposes a stable gRPC API
@@ -86,15 +89,25 @@ against the write path — it opens the table fresh and reads whatever
 ## gRPC API (summary)
 
 ### `GetTable`
-Fetch table version, protocol, and metadata. No file listing — see
+Fetch table version, protocol (including table features), and metadata. No file listing — see
 `ListActiveFiles` below for that. A plain read: takes no lock, reflects
 whatever snapshot is visible at the moment the server opens the table.
+
+- Time travel: set `version` or `timestamp_ms` (not both) to read an earlier state; a version
+  that doesn't exist, or a timestamp before the table's first commit, is `NOT_FOUND`.
+- Idempotent writers: set `app_id` to get `app_transaction_version`, the last `SetTransaction`
+  version that application committed.
 
 ### `Commit`
 Atomically commit Delta actions.
 
 - Optimistic concurrency via `expected_version`
 - Fully typed protobuf actions (no JSON on the wire)
+- File paths in `AddFile` / `RemoveFile` / `AddCDCFile` must be relative to the table root: absolute
+  paths, URIs and `..` segments are rejected (`INVALID_ARGUMENT`), so a writer can't point readers
+  at files outside the table. Absolute-path (`"p"`) deletion vectors are rejected for the same reason.
+- A `SetTransaction(app_id, version)` whose version the table already recorded for that `app_id`
+  (same or newer) is refused with `ALREADY_EXISTS`; treat that as "already committed".
 - If `table_uri` doesn't exist yet, this Commit creates it as the table's version-0 commit —
   `actions` must include both a `Protocol` and a `TableMetadata` action, and `expected_version`
   must be left unset. Every subsequent `Commit` to that `table_uri` behaves as an ordinary
@@ -108,7 +121,9 @@ because a real table's active file set can exceed gRPC's default 4 MiB
 message limit; the stream always starts with one header message (table
 version/schema/protocol, the same info `GetTable` returns) followed by
 zero or more batches of files. Like `GetTable`, a plain read — no lock,
-no interaction with `Commit`'s optimistic-concurrency machinery.
+no interaction with `Commit`'s optimistic-concurrency machinery. Supports the same `version` /
+`timestamp_ms` time travel. Each file carries its deletion vector, if any: readers must apply it,
+since the data file still contains the deleted rows.
 
 ---
 

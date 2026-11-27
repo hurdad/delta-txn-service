@@ -45,6 +45,10 @@ pointed at a real S3-compatible backend.
   table using the documented read-then-commit-with-`expected_version`
   retry pattern, verifying `TableLockManager` and delta-rs's own
   optimistic concurrency produce no lost updates.
+- **`e2e_delta_features.rs`** — time travel on the read RPCs,
+  `SetTransaction` idempotency (`ALREADY_EXISTS` on a retried txn),
+  protocol table features and deletion-vector pass-through, and
+  rejection of file paths that escape the table root.
 - **`e2e_minio.rs`** — the same kind of coverage against a real
   S3-compatible backend (MinIO), since `object_store`'s S3 and local
   filesystem backends differ in conditional-put semantics — exactly what

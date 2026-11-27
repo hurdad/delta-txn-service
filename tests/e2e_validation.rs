@@ -18,6 +18,7 @@ async fn get_table_on_a_table_uri_that_does_not_exist_returns_not_found() {
     let err = client
         .get_table(pb::GetTableRequest {
             table_uri: table_uri.clone(),
+            ..Default::default()
         })
         .await
         .expect_err("GetTable on a nonexistent table_uri must fail");
@@ -34,6 +35,7 @@ async fn list_active_files_on_a_table_uri_that_does_not_exist_returns_not_found(
     let mut stream = client
         .list_active_files(pb::ListActiveFilesRequest {
             table_uri: table_uri.clone(),
+            ..Default::default()
         })
         .await
         .expect("the RPC call itself succeeds; the error arrives as the stream's first item")
@@ -131,6 +133,7 @@ async fn commit_rejects_an_action_with_unspecified_data_change() {
             data_change: pb::DataChange::Unspecified as i32,
             stats: None,
             tags: Default::default(),
+            deletion_vector: None,
         })),
     };
 

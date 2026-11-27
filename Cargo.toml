@@ -50,6 +50,9 @@ deltalake = { version = "1.1.1", features = ["s3"] }
 # delta::commit::create_table now name `url::Url` themselves rather than
 # only ever passing it through opaquely.
 url = "2.5.8"
+# Converts GetTable/ListActiveFiles `timestamp_ms` into the DateTime
+# delta-rs time travel takes. Already in the tree via deltalake.
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 
 # -----------------------------
 # Concurrency / locking

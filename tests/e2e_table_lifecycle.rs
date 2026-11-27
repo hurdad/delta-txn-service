@@ -38,6 +38,7 @@ async fn commit_creates_a_new_table_and_get_table_reads_it_back() {
     let get_table_response = client
         .get_table(pb::GetTableRequest {
             table_uri: table_uri.clone(),
+            ..Default::default()
         })
         .await
         .expect("GetTable on a table that now exists should succeed")
@@ -123,6 +124,7 @@ async fn list_active_files_streams_header_then_batch_with_stats() {
     let mut stream = client
         .list_active_files(pb::ListActiveFilesRequest {
             table_uri: table_uri.clone(),
+            ..Default::default()
         })
         .await
         .expect("ListActiveFiles should succeed")
@@ -215,6 +217,7 @@ async fn list_active_files_excludes_removed_files() {
     let mut stream = client
         .list_active_files(pb::ListActiveFilesRequest {
             table_uri: table_uri.clone(),
+            ..Default::default()
         })
         .await
         .expect("ListActiveFiles should succeed")
@@ -267,6 +270,7 @@ async fn list_active_files_streams_multiple_batches_for_a_large_file_set() {
     let mut stream = client
         .list_active_files(pb::ListActiveFilesRequest {
             table_uri: table_uri.clone(),
+            ..Default::default()
         })
         .await
         .expect("ListActiveFiles should succeed")
