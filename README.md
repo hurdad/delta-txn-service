@@ -193,6 +193,10 @@ AWS_ALLOW_HTTP=true
   (e.g. `AWS_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`,
   `AWS_ALLOW_HTTP`).
 
+### Logging
+- `RUST_LOG`: Log filter (default `info`).
+- `DELTA_TXN_LOG_FORMAT`: `json` for one JSON object per line (for log aggregators); default is plain text.
+
 ### Telemetry (OpenTelemetry)
 - `OTEL_SERVICE_NAME`: Service name used in traces/metrics (default: `delta-txn-service`).
 - OTLP export is gRPC only: `OTEL_EXPORTER_OTLP_PROTOCOL` is not honored, and a non-`grpc` value logs a
@@ -254,6 +258,15 @@ gRPC server metrics via OpenTelemetry:
 
 All metrics include standard RPC attributes:
 `rpc.system`, `rpc.service`, `rpc.method`, and `rpc.grpc.status_code`.
+
+Commit-specific metrics, recorded by the `Commit` handler itself:
+
+- `delta_txn.commits` (counter, attribute `outcome`): `created`, `committed`, `version_conflict`,
+  `already_committed`, `rejected` or `error`. A rising `version_conflict` rate means writers are racing.
+- `delta_txn.commit.lock_wait_ms` (histogram): time waiting for the table's in-process commit lock.
+- `delta_txn.commit.duration_ms` (histogram, attribute `outcome`): end-to-end `Commit` time.
+
+Metric attributes are kept low-cardinality on purpose: `table_uri` is never a label (it's on the trace span).
 
 `grpc.server.errors` correctly counts every non-OK request, including application-level
 failures like "table not found" or a `ListActiveFiles` stream that fails partway through

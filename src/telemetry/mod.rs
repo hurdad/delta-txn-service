@@ -7,7 +7,10 @@
 //! `trace_context` extracts an incoming W3C traceparent header (if any)
 //! and creates the actual per-request tracing span everything else
 //! (including `metrics`'s own recording) then runs inside.
+//! `commit_metrics` records Commit-specific outcomes, lock wait and
+//! duration from inside the Commit handler.
 
+pub mod commit_metrics;
 pub mod metrics;
 pub mod trace_context;
 pub mod tracing;

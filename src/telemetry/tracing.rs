@@ -48,7 +48,12 @@ impl Drop for TelemetryGuard {
 /// for the process's whole lifetime.
 pub fn init_tracing() -> TelemetryGuard {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let fmt_layer = tracing_subscriber::fmt::layer();
+    // DELTA_TXN_LOG_FORMAT=json switches stdout logs to one JSON object per
+    // line (for log aggregators); anything else keeps the human-readable
+    // format. Exactly one of the two layers is Some.
+    let json_logs = log_format_is_json(env::var("DELTA_TXN_LOG_FORMAT").ok().as_deref());
+    let text_layer = (!json_logs).then(tracing_subscriber::fmt::layer);
+    let json_layer = json_logs.then(|| tracing_subscriber::fmt::layer().json());
 
     let mut guard = TelemetryGuard {
         meter_provider: None,
@@ -77,7 +82,8 @@ pub fn init_tracing() -> TelemetryGuard {
 
         let registry = tracing_subscriber::registry()
             .with(env_filter)
-            .with(fmt_layer);
+            .with(text_layer)
+            .with(json_layer);
         if let Some(layer) = otel_layer {
             registry.with(layer).init();
         } else {
@@ -86,11 +92,17 @@ pub fn init_tracing() -> TelemetryGuard {
     } else {
         tracing_subscriber::registry()
             .with(env_filter)
-            .with(fmt_layer)
+            .with(text_layer)
+            .with(json_layer)
             .init();
     }
 
     guard
+}
+
+/// `json` (any case) selects JSON log lines; unset or anything else is text.
+fn log_format_is_json(value: Option<&str>) -> bool {
+    value.is_some_and(|v| v.trim().eq_ignore_ascii_case("json"))
 }
 
 /// Prints a bootstrap-time diagnostic straight to stderr rather than going
@@ -191,4 +203,17 @@ fn otel_export_enabled() -> bool {
     env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok()
         || env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT").is_ok()
         || env::var("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT").is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_format_parsing() {
+        assert!(log_format_is_json(Some("json")));
+        assert!(log_format_is_json(Some(" JSON ")));
+        assert!(!log_format_is_json(Some("text")));
+        assert!(!log_format_is_json(None));
+    }
 }

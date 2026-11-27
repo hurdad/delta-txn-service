@@ -26,6 +26,7 @@ use crate::delta::{
 };
 use crate::grpc::mapping::{map_actions, map_active_file_to_pb, map_protocol_to_pb};
 use crate::locking::table_lock::TableLockManager;
+use crate::telemetry::commit_metrics::{CommitMetrics, CommitOutcome};
 
 // How many files each ListActiveFilesBatch message carries. Large enough
 // that per-message gRPC framing overhead is negligible even for a
@@ -74,6 +75,7 @@ pub struct DeltaTxnGrpcServer {
     storage_opts: HashMap<String, String>,
     allowed_table_prefixes: Option<Vec<String>>,
     max_actions_per_commit: usize,
+    metrics: CommitMetrics,
 }
 
 impl DeltaTxnGrpcServer {
@@ -128,7 +130,162 @@ impl DeltaTxnGrpcServer {
             storage_opts,
             allowed_table_prefixes,
             max_actions_per_commit: DEFAULT_MAX_ACTIONS_PER_COMMIT,
+            // The global meter is a no-op until init_tracing installs an
+            // OTLP meter provider, which main.rs does before this runs.
+            metrics: CommitMetrics::new(&opentelemetry::global::meter("delta-txn-service")),
         }
+    }
+
+    /// The body of Commit; returns the response and whether this commit
+    /// created the table (for CommitMetrics' outcome).
+    async fn commit_inner(
+        &self,
+        req: Request<CommitRequest>,
+    ) -> Result<(CommitResponse, bool), Status> {
+        let r = req.into_inner();
+        let table_uri = r.table_uri;
+
+        let normalized_table_uri = self.normalize_and_check_table_uri(&table_uri)?;
+
+        // Validated before the lock is taken or the table is opened: a
+        // malformed action list (e.g. an unspecified data_change) is a
+        // pure client-input error that doesn't need either a network round
+        // trip to storage or the per-table lock held while it's rejected.
+        if r.actions.is_empty() {
+            return Err(Status::invalid_argument("actions must not be empty"));
+        }
+        if r.actions.len() > self.max_actions_per_commit {
+            return Err(Status::invalid_argument(format!(
+                "{} actions exceeds the limit of {} per commit (DELTA_TXN_MAX_ACTIONS_PER_COMMIT)",
+                r.actions.len(),
+                self.max_actions_per_commit
+            )));
+        }
+        let actions = map_actions(r.actions).map_err(Status::invalid_argument)?;
+
+        // Held across the whole exists-check -> open-table -> version-check
+        // -> commit sequence below, not just the commit call itself -- see
+        // TableLockManager's own doc comment for why the version check has
+        // to be inside the locked section too (otherwise two concurrent
+        // commits could both read the same "current" version and both
+        // pass their own expected_version check before either writes). The
+        // exists-check has to be in here for the same reason: otherwise
+        // two concurrent Commits to the same brand-new table_uri could
+        // both see "doesn't exist yet" and both attempt to create it.
+        let lock = self.locks.lock_for(normalized_table_uri.as_str());
+        let wait_start = std::time::Instant::now();
+        let _guard = lock.lock().await;
+        self.metrics
+            .record_lock_wait(wait_start.elapsed().as_secs_f64() * 1000.0);
+
+        // table_exists() first, not a bare open_table(): open_table (via
+        // delta-rs's own open_table_with_storage_options) fails outright
+        // for a table_uri with no _delta_log at all, indistinguishable at
+        // that point from a genuine storage error -- see table_exists's
+        // own doc comment. A brand-new table_uri isn't a failure here,
+        // it's this RPC's other job: create the table from `actions`'
+        // own Protocol/Metadata, exactly like the very first commit any
+        // Delta writer makes to a location nothing has written to yet.
+        if !table_exists(&normalized_table_uri, self.storage_opts.clone())
+            .await
+            .map_err(Status::from)?
+        {
+            if r.expected_version.is_some() {
+                return Err(Status::failed_precondition(
+                    "expected_version was set but table_uri does not exist yet -- omit \
+                     expected_version on the Commit that creates a new table",
+                ));
+            }
+            // The single shared scan (find_protocol/find_metadata, also
+            // used by create_table below) rather than a separate
+            // has_protocol/has_metadata pass here plus create_table
+            // re-deriving the same values itself -- one definition of
+            // "does this action list have a Protocol/Metadata" for both
+            // to agree on, and the values extracted here are handed
+            // straight to create_table instead of it re-scanning.
+            let protocol = find_protocol(&actions).cloned();
+            let metadata = find_metadata(&actions).cloned();
+            let (Some(protocol), Some(metadata)) = (protocol, metadata) else {
+                return Err(Status::failed_precondition(
+                    "table_uri does not exist yet -- the Commit that creates a new table must \
+                     include both a Protocol and a TableMetadata action",
+                ));
+            };
+
+            let version = create_table(
+                normalized_table_uri,
+                self.storage_opts.clone(),
+                actions,
+                protocol,
+                metadata,
+            )
+            .await
+            .map_err(Status::from)?;
+
+            return Ok((
+                CommitResponse {
+                    committed_version: version,
+                },
+                true,
+            ));
+        }
+
+        let table = open_table(&normalized_table_uri, self.storage_opts.clone())
+            .await
+            .map_err(Status::from)?;
+
+        if let Some(expected) = r.expected_version {
+            // delta-rs's DeltaTable::version() returns u64; expected/actual
+            // (and the wire contract, delta_txn.proto) are int64 -- see the
+            // matching comment on snapshot.version() below.
+            let current = table
+                .version()
+                .ok_or_else(|| Status::failed_precondition("table not initialized"))?
+                as i64;
+            if current != expected {
+                return Err(Status::from(DeltaTxnError::VersionConflict {
+                    expected,
+                    actual: current,
+                }));
+            }
+        }
+
+        // Server-side idempotency for SetTransaction: inside the lock, so
+        // two concurrent retries of the same (app_id, version) can't both
+        // pass. Without this a client retrying a Commit whose outcome it
+        // never saw (a timeout) would commit the same files twice.
+        for action in &actions {
+            if let deltalake::kernel::Action::Txn(txn) = action {
+                let committed = table
+                    .snapshot()
+                    .map_err(map_open_or_snapshot_error)?
+                    .transaction_version(table.log_store().as_ref(), &txn.app_id)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!(error = %e, "failed to read app transaction version");
+                        Status::internal("internal error reading app transaction version")
+                    })?;
+                if let Some(committed) = committed {
+                    if committed >= txn.version {
+                        return Err(Status::from(DeltaTxnError::TransactionAlreadyCommitted {
+                            app_id: txn.app_id.clone(),
+                            committed,
+                        }));
+                    }
+                }
+            }
+        }
+
+        let version = commit_actions(table, actions)
+            .await
+            .map_err(|e| Status::from(e))?;
+
+        Ok((
+            CommitResponse {
+                committed_version: version,
+            },
+            false,
+        ))
     }
 
     pub fn into_service(self) -> DeltaTxnServiceServer<Self> {
@@ -401,141 +558,16 @@ impl DeltaTxnService for DeltaTxnGrpcServer {
         &self,
         req: Request<CommitRequest>,
     ) -> Result<Response<CommitResponse>, Status> {
-        let r = req.into_inner();
-        let table_uri = r.table_uri;
-
-        let normalized_table_uri = self.normalize_and_check_table_uri(&table_uri)?;
-
-        // Validated before the lock is taken or the table is opened: a
-        // malformed action list (e.g. an unspecified data_change) is a
-        // pure client-input error that doesn't need either a network round
-        // trip to storage or the per-table lock held while it's rejected.
-        if r.actions.is_empty() {
-            return Err(Status::invalid_argument("actions must not be empty"));
-        }
-        if r.actions.len() > self.max_actions_per_commit {
-            return Err(Status::invalid_argument(format!(
-                "{} actions exceeds the limit of {} per commit (DELTA_TXN_MAX_ACTIONS_PER_COMMIT)",
-                r.actions.len(),
-                self.max_actions_per_commit
-            )));
-        }
-        let actions = map_actions(r.actions).map_err(Status::invalid_argument)?;
-
-        // Held across the whole exists-check -> open-table -> version-check
-        // -> commit sequence below, not just the commit call itself -- see
-        // TableLockManager's own doc comment for why the version check has
-        // to be inside the locked section too (otherwise two concurrent
-        // commits could both read the same "current" version and both
-        // pass their own expected_version check before either writes). The
-        // exists-check has to be in here for the same reason: otherwise
-        // two concurrent Commits to the same brand-new table_uri could
-        // both see "doesn't exist yet" and both attempt to create it.
-        let lock = self.locks.lock_for(normalized_table_uri.as_str());
-        let _guard = lock.lock().await;
-
-        // table_exists() first, not a bare open_table(): open_table (via
-        // delta-rs's own open_table_with_storage_options) fails outright
-        // for a table_uri with no _delta_log at all, indistinguishable at
-        // that point from a genuine storage error -- see table_exists's
-        // own doc comment. A brand-new table_uri isn't a failure here,
-        // it's this RPC's other job: create the table from `actions`'
-        // own Protocol/Metadata, exactly like the very first commit any
-        // Delta writer makes to a location nothing has written to yet.
-        if !table_exists(&normalized_table_uri, self.storage_opts.clone())
-            .await
-            .map_err(Status::from)?
-        {
-            if r.expected_version.is_some() {
-                return Err(Status::failed_precondition(
-                    "expected_version was set but table_uri does not exist yet -- omit \
-                     expected_version on the Commit that creates a new table",
-                ));
-            }
-            // The single shared scan (find_protocol/find_metadata, also
-            // used by create_table below) rather than a separate
-            // has_protocol/has_metadata pass here plus create_table
-            // re-deriving the same values itself -- one definition of
-            // "does this action list have a Protocol/Metadata" for both
-            // to agree on, and the values extracted here are handed
-            // straight to create_table instead of it re-scanning.
-            let protocol = find_protocol(&actions).cloned();
-            let metadata = find_metadata(&actions).cloned();
-            let (Some(protocol), Some(metadata)) = (protocol, metadata) else {
-                return Err(Status::failed_precondition(
-                    "table_uri does not exist yet -- the Commit that creates a new table must \
-                     include both a Protocol and a TableMetadata action",
-                ));
-            };
-
-            let version = create_table(
-                normalized_table_uri,
-                self.storage_opts.clone(),
-                actions,
-                protocol,
-                metadata,
-            )
-            .await
-            .map_err(Status::from)?;
-
-            return Ok(Response::new(CommitResponse {
-                committed_version: version,
-            }));
-        }
-
-        let table = open_table(&normalized_table_uri, self.storage_opts.clone())
-            .await
-            .map_err(Status::from)?;
-
-        if let Some(expected) = r.expected_version {
-            // delta-rs's DeltaTable::version() returns u64; expected/actual
-            // (and the wire contract, delta_txn.proto) are int64 -- see the
-            // matching comment on snapshot.version() below.
-            let current = table
-                .version()
-                .ok_or_else(|| Status::failed_precondition("table not initialized"))?
-                as i64;
-            if current != expected {
-                return Err(Status::from(DeltaTxnError::VersionConflict {
-                    expected,
-                    actual: current,
-                }));
-            }
-        }
-
-        // Server-side idempotency for SetTransaction: inside the lock, so
-        // two concurrent retries of the same (app_id, version) can't both
-        // pass. Without this a client retrying a Commit whose outcome it
-        // never saw (a timeout) would commit the same files twice.
-        for action in &actions {
-            if let deltalake::kernel::Action::Txn(txn) = action {
-                let committed = table
-                    .snapshot()
-                    .map_err(map_open_or_snapshot_error)?
-                    .transaction_version(table.log_store().as_ref(), &txn.app_id)
-                    .await
-                    .map_err(|e| {
-                        tracing::error!(error = %e, "failed to read app transaction version");
-                        Status::internal("internal error reading app transaction version")
-                    })?;
-                if let Some(committed) = committed {
-                    if committed >= txn.version {
-                        return Err(Status::from(DeltaTxnError::TransactionAlreadyCommitted {
-                            app_id: txn.app_id.clone(),
-                            committed,
-                        }));
-                    }
-                }
-            }
-        }
-
-        let version = commit_actions(table, actions)
-            .await
-            .map_err(|e| Status::from(e))?;
-
-        Ok(Response::new(CommitResponse {
-            committed_version: version,
-        }))
+        let start = std::time::Instant::now();
+        let result = self.commit_inner(req).await;
+        let outcome = match &result {
+            Ok((_, true)) => CommitOutcome::Created,
+            Ok((_, false)) => CommitOutcome::Committed,
+            Err(status) => CommitOutcome::from_code(status.code()),
+        };
+        self.metrics
+            .record_commit(outcome, start.elapsed().as_secs_f64() * 1000.0);
+        result.map(|(response, _)| Response::new(response))
     }
 
     /// Returns a table's current version, metadata (including its schema),
