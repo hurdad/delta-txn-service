@@ -1,0 +1,11 @@
+# Only Cargo.toml, Cargo.lock, build.rs, proto/, src/ and tests/ are
+# COPY'd, but the whole context is uploaded on every build: keep the big
+# and irrelevant directories out of it.
+target/
+.git/
+.github/
+.claude/
+.idea/
+deploy/
+*.md
+!proto/*.md
