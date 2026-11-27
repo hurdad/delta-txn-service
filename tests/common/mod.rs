@@ -1,6 +1,7 @@
 //! Shared setup for the gRPC integration test suite: spins up a real
-//! `DeltaTxnGrpcServer` (mirroring main.rs's own service construction,
-//! including the grpc.health.v1.Health service) bound to an OS-assigned
+//! `DeltaTxnGrpcServer` through `delta_txn_service::app::serve` -- the same
+//! function main.rs calls, so layers, auth, health, TLS and limits are the
+//! production wiring, not a copy of it -- bound to an OS-assigned
 //! ephemeral localhost port, and hands out throwaway `file://` table_uris
 //! under a fresh tempdir per server -- no S3 dependency, so this
 //! suite runs anywhere `cargo test` does, including inside the Docker
@@ -23,17 +24,19 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 
-use delta_txn_service::grpc::auth::{make_auth_interceptor, single_api_key};
+use delta_txn_service::app::{self, BoxError, ServeOptions};
+use delta_txn_service::config::grpc::{parse_grpc_config, TlsConfig};
+use delta_txn_service::grpc::auth::single_api_key;
 // `pub use`, not `use`: test files reference these as `common::pb::...`
 // rather than each needing their own `use delta_txn_service::grpc::...`.
 pub use delta_txn_service::grpc::server::pb;
 use delta_txn_service::grpc::server::pb::delta_txn_service_client::DeltaTxnServiceClient;
-use delta_txn_service::grpc::server::pb::delta_txn_service_server::DeltaTxnServiceServer;
 use delta_txn_service::grpc::server::DeltaTxnGrpcServer;
+use std::time::Duration;
 use tempfile::TempDir;
 use tokio::net::TcpListener;
-use tokio_stream::wrappers::TcpListenerStream;
-use tonic::transport::{Channel, Server};
+use tokio::sync::oneshot;
+use tonic::transport::Channel;
 
 /// The generated gRPC client type every test uses.
 pub type Client = DeltaTxnServiceClient<Channel>;
@@ -54,6 +57,16 @@ pub struct TestServerConfig {
     pub storage_opts: HashMap<String, String>,
     /// Overrides DEFAULT_MAX_ACTIONS_PER_COMMIT when set.
     pub max_actions_per_commit: Option<usize>,
+    /// Serve over TLS (tests connect with their own TLS client, not
+    /// `connect()`).
+    pub tls: Option<TlsConfig>,
+    /// Overrides DEFAULT_MAX_MESSAGE_BYTES when set.
+    pub max_message_bytes: Option<usize>,
+    /// Overrides DEFAULT_REQUEST_TIMEOUT when set.
+    pub request_timeout: Option<Duration>,
+    /// Enables the storage readiness probe against this endpoint.
+    pub storage_probe_endpoint: Option<String>,
+    pub storage_probe_interval: Option<Duration>,
 }
 
 /// A running `DeltaTxnGrpcServer` plus the tempdir its `file://` tables
@@ -63,7 +76,8 @@ pub struct TestServerConfig {
 pub struct TestServer {
     addr: SocketAddr,
     tmp_dir: TempDir,
-    server_task: tokio::task::JoinHandle<()>,
+    server_task: tokio::task::JoinHandle<Result<(), BoxError>>,
+    shutdown_tx: Option<oneshot::Sender<()>>,
 }
 
 impl Drop for TestServer {
@@ -101,34 +115,64 @@ impl TestServer {
         if let Some(max) = config.max_actions_per_commit {
             svc = svc.with_max_actions_per_commit(max);
         }
-        let svc = DeltaTxnServiceServer::with_interceptor(
+
+        // Start from the same defaults an operator with no env vars set
+        // gets, then apply this test's overrides.
+        let mut grpc_config = parse_grpc_config(|_| None).expect("default config must parse");
+        grpc_config.addr = addr;
+        grpc_config.api_keys = single_api_key(config.api_key);
+        grpc_config.tls = config.tls;
+        if let Some(max) = config.max_message_bytes {
+            grpc_config.max_message_bytes = max;
+        }
+        if let Some(timeout) = config.request_timeout {
+            grpc_config.request_timeout = Some(timeout);
+        }
+        let options = ServeOptions {
+            storage_endpoint: config.storage_probe_endpoint,
+            storage_probe_interval: config
+                .storage_probe_interval
+                .unwrap_or(app::DEFAULT_STORAGE_PROBE_INTERVAL),
+        };
+
+        // serve() installs it too, but it runs on a spawned task; install
+        // here so a TLS test client connecting right away has it already.
+        app::install_crypto_provider();
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server_task = tokio::spawn(app::serve(
+            grpc_config,
             svc,
-            make_auth_interceptor(single_api_key(config.api_key)),
-        );
-
-        // Mirrors main.rs's own health-service wiring (see that file's
-        // comment on why it's unauthenticated / outside the interceptor):
-        // exercised directly by tests/e2e_health.rs, and its presence
-        // shouldn't diverge between the real binary and this harness.
-        let (health_reporter, health_service) = tonic_health::server::health_reporter();
-        health_reporter
-            .set_serving::<DeltaTxnServiceServer<DeltaTxnGrpcServer>>()
-            .await;
-
-        let server_task = tokio::spawn(async move {
-            Server::builder()
-                .add_service(svc)
-                .add_service(health_service)
-                .serve_with_incoming(TcpListenerStream::new(listener))
-                .await
-                .expect("test server exited unexpectedly");
-        });
+            listener,
+            options,
+            async move {
+                let _ = shutdown_rx.await;
+            },
+        ));
 
         Self {
             addr,
             tmp_dir,
             server_task,
+            shutdown_tx: Some(shutdown_tx),
         }
+    }
+
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    /// Triggers graceful shutdown and returns what `app::serve` returned.
+    pub async fn shutdown(mut self) -> Result<(), BoxError> {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        (&mut self.server_task).await.expect("server task panicked")
+    }
+
+    /// Waits for `app::serve` to return on its own (e.g. a startup error).
+    pub async fn join(mut self) -> Result<(), BoxError> {
+        (&mut self.server_task).await.expect("server task panicked")
     }
 
     /// A fresh, never-yet-used `file://` table_uri under this server's own

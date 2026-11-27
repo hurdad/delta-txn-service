@@ -33,6 +33,12 @@ prost-types = "0.14.3"
 # gRPC health probe instead of a bare TCP-connect check, without needing to
 # supply an API key from a liveness/readiness probe.
 tonic-health = "0.14.6"
+# Direct dependency only to pick the process-wide crypto provider (see
+# app::install_crypto_provider): the dependency graph enables both of
+# rustls's backends (ring via tonic/otlp tls-ring, aws-lc-rs via delta-rs's
+# reqwest and the AWS SDK), and with both on, rustls can't choose one
+# itself and panics on the first TLS handshake.
+rustls = { version = "0.23.46", default-features = false, features = ["ring"] }
 tower = "0.5.3"
 http-body = "1.0.1"
 # Safe Pin projection for MetricsBody (telemetry/metrics.rs) -- already
@@ -79,6 +85,7 @@ opentelemetry_sdk = { version = "0.33.1", features = ["rt-tokio"] }
 tonic-prost-build = "0.14.3"
 
 [dev-dependencies]
+rcgen = "0.14.10"
 # tests/ (the gRPC integration test suite) creates each test's Delta table
 # under a throwaway `file://` tempdir -- no S3 dependency, so the
 # suite runs anywhere `cargo test` does, including the Docker build's own

@@ -4,9 +4,10 @@
 //! `grpc` is the DeltaTxnService implementation and its protobuf<->kernel
 //! type mapping; `locking` provides optional per-table_uri commit
 //! serialization; `config`/`telemetry` are startup configuration and
-//! observability. main.rs (not part of this library crate) wires all of
-//! it into a running server.
+//! observability; `app` assembles them into a running server (main.rs,
+//! not part of this library crate, is the process shell around it).
 
+pub mod app;
 pub mod config;
 pub mod delta;
 pub mod grpc;
